@@ -1,0 +1,15 @@
+[package]
+name = "raven-ops"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "File operation engine for RavenFileManager"
+
+[dependencies]
+raven-core = { workspace = true }
+raven-vfs = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }

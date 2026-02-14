@@ -1,0 +1,90 @@
+/* Raven File Manager custom styles */
+
+.navigation-sidebar {
+    background: transparent;
+}
+
+.path-bar {
+    min-height: 32px;
+}
+
+.path-bar button.flat {
+    padding: 2px 6px;
+    min-height: 24px;
+}
+
+.data-table {
+    font-size: 13px;
+}
+
+.monospace {
+    font-family: monospace;
+}
+
+.dim-label {
+    opacity: 0.55;
+}
+
+.sidebar .heading {
+    font-weight: bold;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    opacity: 0.7;
+}
+
+/* Git status colors */
+.git-modified {
+    color: @warning_color;
+}
+
+.git-added {
+    color: @success_color;
+}
+
+.git-deleted {
+    color: @error_color;
+}
+
+.git-untracked {
+    color: @accent_color;
+}
+
+.git-conflict {
+    color: @error_color;
+    font-weight: bold;
+}
+
+/* Tab bar */
+.tab-bar {
+    border-bottom: 1px solid @borders;
+    padding: 2px 4px;
+}
+
+.tab-bar button {
+    padding: 4px 8px;
+    min-height: 24px;
+    border-radius: 6px;
+}
+
+/* Search bar */
+.search-bar {
+    background: alpha(@window_bg_color, 0.3);
+    padding: 4px 8px;
+    border-bottom: 1px solid @borders;
+}
+
+/* Preview panel */
+.preview-panel {
+    background: alpha(@window_bg_color, 0.5);
+    border-left: 1px solid @borders;
+}
+
+/* Operation panel */
+.operation-panel {
+    padding: 8px;
+}
+
+.operation-panel progressbar {
+    min-height: 8px;
+}

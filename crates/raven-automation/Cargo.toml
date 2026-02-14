@@ -1,0 +1,16 @@
+[package]
+name = "raven-automation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Workflow automation engine for RavenFileManager"
+
+[dependencies]
+raven-core = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+notify = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }

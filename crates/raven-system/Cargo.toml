@@ -1,0 +1,13 @@
+[package]
+name = "raven-system"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "System integration for RavenFileManager"
+
+[dependencies]
+raven-core = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }

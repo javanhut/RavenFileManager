@@ -1,0 +1,38 @@
+# Custom context menu actions
+# These appear in the right-click context menu
+
+[[actions]]
+name = "Open in Terminal"
+command = "xdg-terminal-emulator"
+args = ["--working-directory", "{directory}"]
+icon = "utilities-terminal-symbolic"
+show_for = "directories"
+
+[[actions]]
+name = "Open in Code"
+command = "code"
+args = ["{path}"]
+icon = "text-editor-symbolic"
+show_for = "all"
+
+[[actions]]
+name = "Open as Root"
+command = "pkexec"
+args = ["xdg-open", "{path}"]
+icon = "dialog-password-symbolic"
+show_for = "all"
+
+[[actions]]
+name = "Compress..."
+command = "file-roller"
+args = ["--add", "{paths}"]
+icon = "package-x-generic-symbolic"
+show_for = "all"
+multiple = true
+
+[[actions]]
+name = "Extract Here"
+command = "file-roller"
+args = ["--extract-here", "{path}"]
+icon = "package-x-generic-symbolic"
+show_for = "archives"

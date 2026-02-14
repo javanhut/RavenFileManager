@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Raven File Manager
+Comment=Fast, powerful, and extensible file manager
+Exec=raven %U
+Icon=com.ravenfilemanager.Raven
+Terminal=false
+Type=Application
+Categories=System;FileTools;FileManager;GTK;
+MimeType=inode/directory;
+Keywords=Files;Folders;Explorer;Browser;Manager;
+StartupNotify=true

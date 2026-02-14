@@ -1,0 +1,104 @@
+[workspace]
+members = [
+    "crates/raven-core",
+    "crates/raven-vfs",
+    "crates/raven-ops",
+    "crates/raven-search",
+    "crates/raven-preview",
+    "crates/raven-automation",
+    "crates/raven-git",
+    "crates/raven-system",
+    "crates/raven-plugin",
+    "crates/raven-dbus",
+    "crates/raven-ai",
+    "crates/raven-ui",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["RavenFileManager Contributors"]
+
+[workspace.dependencies]
+# Internal crates
+raven-core = { path = "crates/raven-core" }
+raven-vfs = { path = "crates/raven-vfs" }
+raven-ops = { path = "crates/raven-ops" }
+raven-search = { path = "crates/raven-search" }
+raven-preview = { path = "crates/raven-preview" }
+raven-automation = { path = "crates/raven-automation" }
+raven-git = { path = "crates/raven-git" }
+raven-system = { path = "crates/raven-system" }
+raven-plugin = { path = "crates/raven-plugin" }
+raven-dbus = { path = "crates/raven-dbus" }
+raven-ai = { path = "crates/raven-ai" }
+raven-ui = { path = "crates/raven-ui" }
+
+# Core
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Async
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+
+# GTK
+gtk4 = "0.10"
+libadwaita = { version = "0.8", features = ["v1_4"] }
+glib = "0.21"
+gio = "0.21"
+
+# Filesystem
+notify = "8"
+ignore = "0.4"
+
+# Search
+regex = "1"
+grep-searcher = "0.1"
+grep-regex = "0.1"
+
+# Git
+gix = { version = "0.79", default-features = false, features = ["status"] }
+
+# Preview
+syntect = "5"
+image = "0.25"
+
+# Utilities
+open = "5"
+
+# Hashing
+blake3 = "1"
+
+[package]
+name = "raven-file-manager"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "raven"
+path = "src/main.rs"
+
+[dependencies]
+raven-core = { workspace = true }
+raven-vfs = { workspace = true }
+raven-ops = { workspace = true }
+raven-search = { workspace = true }
+raven-preview = { workspace = true }
+raven-git = { workspace = true }
+raven-ui = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+gtk4 = { workspace = true }
+libadwaita = { workspace = true }
+glib = { workspace = true }
+gio = { workspace = true }
+chrono = { workspace = true }

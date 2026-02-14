@@ -1,0 +1,13 @@
+[package]
+name = "raven-dbus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DBus interface for RavenFileManager"
+
+[dependencies]
+raven-core = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }

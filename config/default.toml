@@ -1,0 +1,66 @@
+[general]
+show_hidden_files = false
+confirm_delete = true
+confirm_trash = false
+single_click_open = false
+default_terminal = "xdg-terminal-emulator"
+
+[appearance]
+icon_size = 24
+font_size = 13
+show_path_bar = true
+show_status_bar = true
+show_sidebar = true
+sidebar_width = 200
+preview_panel_width = 300
+
+[navigation]
+default_sort_column = "Name"
+default_sort_direction = "Ascending"
+directories_first = true
+
+[operations]
+max_concurrent_operations = 4
+copy_buffer_size = 65536
+default_conflict_strategy = "ask"
+
+[preview]
+max_text_size = 1048576
+max_image_size = 52428800
+cache_size_mb = 256
+enabled = true
+
+[search]
+max_results = 10000
+respect_gitignore = true
+follow_symlinks = false
+
+[[bookmarks]]
+name = "Home"
+path = "~"
+icon = "user-home-symbolic"
+
+[[bookmarks]]
+name = "Documents"
+path = "~/Documents"
+icon = "folder-documents-symbolic"
+
+[[bookmarks]]
+name = "Downloads"
+path = "~/Downloads"
+icon = "folder-download-symbolic"
+
+[[bookmarks]]
+name = "Music"
+path = "~/Music"
+icon = "folder-music-symbolic"
+
+[[bookmarks]]
+name = "Pictures"
+path = "~/Pictures"
+icon = "folder-pictures-symbolic"
+
+[[bookmarks]]
+name = "Videos"
+path = "~/Videos"
+icon = "folder-videos-symbolic"

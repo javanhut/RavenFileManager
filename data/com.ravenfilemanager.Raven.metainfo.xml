@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.ravenfilemanager.Raven</id>
+  <name>Raven File Manager</name>
+  <summary>Fast, powerful, and extensible file manager for Linux</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <description>
+    <p>
+      Raven is a next-generation file manager built with Rust and GTK4/Libadwaita.
+      It combines speed and power with workflow automation, deep system integration,
+      and AI-powered features.
+    </p>
+    <p>Key features:</p>
+    <ul>
+      <li>Fast async file operations with progress tracking and undo</li>
+      <li>Dual pane and tabbed browsing</li>
+      <li>Git status overlays</li>
+      <li>Instant type-ahead filtering and recursive search</li>
+      <li>File preview with syntax highlighting</li>
+      <li>Customizable keyboard shortcuts</li>
+      <li>Workflow automation (Hazel for Linux)</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">com.ravenfilemanager.Raven.desktop</launchable>
+  <url type="homepage">https://github.com/ravenfilemanager/raven</url>
+  <url type="bugtracker">https://github.com/ravenfilemanager/raven/issues</url>
+  <content_rating type="oars-1.1" />
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </recommends>
+</component>

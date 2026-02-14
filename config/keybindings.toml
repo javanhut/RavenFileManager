@@ -1,0 +1,40 @@
+# Raven File Manager keybindings
+# Format: action = "key combo"
+
+[navigation]
+back = "Alt+Left"
+forward = "Alt+Right"
+up = "Alt+Up"
+home = "Alt+Home"
+refresh = "Ctrl+R"
+edit_path = "Ctrl+L"
+
+[view]
+toggle_hidden = "Ctrl+H"
+toggle_preview = "Space"
+zoom_in = "Ctrl+plus"
+zoom_out = "Ctrl+minus"
+zoom_reset = "Ctrl+0"
+
+[tabs]
+new_tab = "Ctrl+T"
+close_tab = "Ctrl+W"
+next_tab = "Ctrl+Tab"
+prev_tab = "Ctrl+Shift+Tab"
+dual_pane = "F3"
+
+[files]
+copy = "Ctrl+C"
+cut = "Ctrl+X"
+paste = "Ctrl+V"
+delete = "Delete"
+trash = "Ctrl+Delete"
+rename = "F2"
+new_folder = "Ctrl+Shift+N"
+new_file = "Ctrl+N"
+select_all = "Ctrl+A"
+undo = "Ctrl+Z"
+
+[search]
+search = "Ctrl+F"
+filter = "/"
