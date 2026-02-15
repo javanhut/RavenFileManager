@@ -5,6 +5,7 @@ use gtk::subclass::prelude::*;
 
 use raven_core::commands::AppCommand;
 use raven_core::entry::{EntryKind, FileEntry};
+use raven_core::path::RavenPath;
 
 use crate::state::AppState;
 
@@ -218,10 +219,11 @@ impl FileListView {
             let item = item.downcast_ref::<gtk::ListItem>().unwrap();
             let entry_obj = item.item().and_downcast::<FileEntryObject>().unwrap();
             let label = item.child().and_downcast::<gtk::Label>().unwrap();
-            if entry_obj.is_dir() {
-                label.set_text("--");
+            let size = entry_obj.size();
+            if entry_obj.is_dir() && size == 0 {
+                label.set_text("...");
             } else {
-                label.set_text(&format_size(entry_obj.size()));
+                label.set_text(&format_size(size));
             }
         });
         let size_col = gtk::ColumnViewColumn::new(Some("Size"), Some(size_factory));
@@ -325,6 +327,26 @@ impl FileListView {
                 continue;
             }
             self.model.append(&FileEntryObject::new(entry));
+        }
+    }
+
+    /// Update a directory entry's displayed size after async calculation.
+    pub fn update_dir_size(&self, path: &RavenPath, size: u64) {
+        let n = self.model.n_items();
+        for i in 0..n {
+            if let Some(obj) = self.model.item(i).and_then(|o| o.downcast::<FileEntryObject>().ok()) {
+                let matches = obj
+                    .entry()
+                    .map(|e| e.is_dir() && &e.path == path)
+                    .unwrap_or(false);
+                if matches {
+                    obj.set_size(size);
+                    // Remove and re-insert to force the column to rebind
+                    self.model.remove(i);
+                    self.model.insert(i, &obj);
+                    return;
+                }
+            }
         }
     }
 }

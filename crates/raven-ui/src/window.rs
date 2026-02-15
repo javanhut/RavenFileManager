@@ -994,6 +994,19 @@ impl RavenWindow {
                     .set_text(&format!("System error: {}", error));
             }
 
+            // --- Directory size updates ---
+            AppEvent::DirSizeCalculated {
+                pane_id,
+                path,
+                size,
+            } => {
+                // Only update if this is still the active pane
+                let active_pane_id = self.state.borrow().active_tab().active_pane().id;
+                if pane_id == active_pane_id {
+                    self.file_list.update_dir_size(&path, size);
+                }
+            }
+
             // --- Notifications ---
             AppEvent::Notification {
                 title,

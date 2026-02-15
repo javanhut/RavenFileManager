@@ -143,6 +143,13 @@ pub enum AppEvent {
         error: String,
     },
 
+    // Directory size (async calculation for listing)
+    DirSizeCalculated {
+        pane_id: u32,
+        path: RavenPath,
+        size: u64,
+    },
+
     // Notifications
     Notification {
         title: String,

@@ -8,6 +8,7 @@ use raven_core::config::AppConfig;
 use raven_core::entry::FileEntry;
 use raven_core::events::AppEvent;
 use raven_core::operations::{Operation, OperationId, OperationKind};
+use raven_core::path::RavenPath;
 use raven_core::sort::SortSpec;
 use raven_core::vfs::VirtualFileSystem;
 use raven_dbus::service::DbusService;
@@ -142,6 +143,14 @@ fn main() -> glib::ExitCode {
                             match vfs.list_dir(&path).await {
                                 Ok(mut entries) => {
                                     sort_entries(&mut entries, &SortSpec::default());
+
+                                    // Collect directory paths for async size calculation
+                                    let dir_paths: Vec<RavenPath> = entries
+                                        .iter()
+                                        .filter(|e| e.is_dir())
+                                        .map(|e| e.path.clone())
+                                        .collect();
+
                                     let event = AppEvent::DirectoryLoaded {
                                         pane_id,
                                         path,
@@ -149,6 +158,21 @@ fn main() -> glib::ExitCode {
                                     };
                                     dbus_service.handle_event(&event).await;
                                     let _ = event_tx.send(event);
+
+                                    // Spawn async size calculations for each subdirectory
+                                    for dir_path in dir_paths {
+                                        if let Some(local) = dir_path.as_local_path().cloned() {
+                                            let event_tx = event_tx.clone();
+                                            tokio::spawn(async move {
+                                                let size = calculate_dir_size(&local).await;
+                                                let _ = event_tx.send(AppEvent::DirSizeCalculated {
+                                                    pane_id,
+                                                    path: dir_path,
+                                                    size,
+                                                });
+                                            });
+                                        }
+                                    }
                                 }
                                 Err(e) => {
                                     let _ = event_tx.send(AppEvent::DirectoryError {
@@ -864,4 +888,32 @@ fn make_progress_reporter(
     Arc::new(move |progress| {
         let _ = event_tx.send(AppEvent::OperationProgress { progress });
     })
+}
+
+/// Recursively calculate the total size of a directory's contents.
+async fn calculate_dir_size(path: &std::path::Path) -> u64 {
+    let mut total: u64 = 0;
+    let mut stack = vec![path.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        let mut read_dir = match tokio::fs::read_dir(&dir).await {
+            Ok(rd) => rd,
+            Err(_) => continue,
+        };
+        while let Ok(Some(entry)) = read_dir.next_entry().await {
+            let ft = match entry.file_type().await {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            if ft.is_file() || ft.is_symlink() {
+                if let Ok(meta) = entry.metadata().await {
+                    total += meta.len();
+                }
+            } else if ft.is_dir() {
+                stack.push(entry.path());
+            }
+        }
+    }
+
+    total
 }
