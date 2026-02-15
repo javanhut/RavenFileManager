@@ -88,3 +88,10 @@
 .operation-panel progressbar {
     min-height: 8px;
 }
+
+/* Drop highlight for drag-and-drop targets */
+.drop-highlight {
+    background-color: alpha(@accent_color, 0.15);
+    border: 1px dashed @accent_color;
+    border-radius: 6px;
+}

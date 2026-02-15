@@ -43,6 +43,8 @@ pub struct RavenWindow {
     properties_dialog: Rc<RefCell<Option<Rc<RefCell<PropertiesDialog>>>>>,
     // Context menu
     context_menu: Rc<FileContextMenu>,
+    // Sidebar (for dynamic bookmark pinning)
+    sidebar: Rc<Sidebar>,
 }
 
 impl RavenWindow {
@@ -178,11 +180,7 @@ impl RavenWindow {
         let content_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
 
         // Sidebar
-        let bookmarks = {
-            let s = state.borrow();
-            s.config.bookmarks.clone()
-        };
-        let sidebar = Sidebar::new(&bookmarks, command_tx.clone(), pane_id);
+        let sidebar = Rc::new(Sidebar::new(state.clone(), command_tx.clone(), pane_id));
         let sidebar_scroll = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vscrollbar_policy(gtk::PolicyType::Automatic)
@@ -220,9 +218,9 @@ impl RavenWindow {
                             }
                         }
                         let _ = cmd_tx.send(AppCommand::Navigate { path: entry.path, pane_id });
-                    } else if let Some(local) = entry.path.as_local_path() {
-                        let uri = format!("file://{}", local.display());
-                        let _ = open::that(&uri);
+                    } else {
+                        let config = state.borrow().config.clone();
+                        crate::file_opener::open_file(&entry.path, &config);
                     }
                 }
             });
@@ -346,6 +344,42 @@ impl RavenWindow {
             action_group.add_action(&action);
         }
 
+        // file.pin_to_sidebar
+        {
+            let file_list = file_list.clone();
+            let sidebar = sidebar.clone();
+            let action = gio::SimpleAction::new("pin_to_sidebar", None);
+            action.connect_activate(move |_, _| {
+                if let Some(entry) = get_selected_entry(&file_list) {
+                    if entry.is_dir() {
+                        if let Some(local) = entry.path.as_local_path() {
+                            let bookmark = raven_core::config::Bookmark {
+                                name: entry.name.clone(),
+                                path: local.to_string_lossy().to_string(),
+                                icon: Some("folder-symbolic".to_string()),
+                            };
+                            sidebar.add_bookmark(&bookmark);
+                        }
+                    }
+                }
+            });
+            action_group.add_action(&action);
+        }
+
+        // file.open-with-N actions (support up to 20 associations)
+        for assoc_idx in 0..20 {
+            let file_list = file_list.clone();
+            let state = state.clone();
+            let action = gio::SimpleAction::new(&format!("open-with-{}", assoc_idx), None);
+            action.connect_activate(move |_, _| {
+                if let Some(entry) = get_selected_entry(&file_list) {
+                    let config = state.borrow().config.clone();
+                    crate::file_opener::open_with_association(&entry.path, &config, assoc_idx);
+                }
+            });
+            action_group.add_action(&action);
+        }
+
         file_list
             .column_view
             .insert_action_group("file", Some(&action_group));
@@ -353,9 +387,16 @@ impl RavenWindow {
         // Right-click gesture for context menu
         {
             let context_menu = context_menu.clone();
+            let file_list_for_ctx = file_list.clone();
+            let state = state.clone();
             let gesture = gtk::GestureClick::new();
             gesture.set_button(3); // Right click
             gesture.connect_released(move |_, _, x, y| {
+                // Update "Open With" submenu before showing
+                if let Some(entry) = get_selected_entry(&file_list_for_ctx) {
+                    let config = state.borrow().config.clone();
+                    context_menu.update_open_with(&entry, &config);
+                }
                 let rect = gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1);
                 context_menu.popover.set_pointing_to(Some(&rect));
                 context_menu.popover.popup();
@@ -670,6 +711,7 @@ impl RavenWindow {
             disk_usage_bar,
             properties_dialog,
             context_menu,
+            sidebar,
         }
     }
 

@@ -1,3 +1,7 @@
+use std::cell::RefCell;
+use std::path::Path;
+use std::rc::Rc;
+
 use gtk4 as gtk;
 use gtk::prelude::*;
 use gtk::glib;
@@ -186,6 +190,26 @@ impl FileListView {
             label.set_ellipsize(gtk::pango::EllipsizeMode::End);
             hbox.append(&icon);
             hbox.append(&label);
+
+            // DragSource for each row
+            let uri_cell: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+            let drag_source = gtk::DragSource::new();
+            drag_source.set_actions(gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE);
+            let uri_for_prepare = uri_cell.clone();
+            drag_source.connect_prepare(move |_source, _x, _y| {
+                let uri = uri_for_prepare.borrow().clone();
+                if uri.is_empty() {
+                    return None;
+                }
+                Some(gtk::gdk::ContentProvider::for_value(&uri.to_value()))
+            });
+            hbox.add_controller(drag_source);
+
+            // Store uri_cell in hbox's widget data for access in connect_bind
+            unsafe {
+                hbox.set_data("drag-uri-cell", uri_cell);
+            }
+
             item.set_child(Some(&hbox));
         });
         name_factory.connect_bind(|_, item| {
@@ -200,6 +224,36 @@ impl FileListView {
                 label.set_opacity(0.5);
             } else {
                 label.set_opacity(1.0);
+            }
+
+            if let Some(entry) = entry_obj.entry() {
+                // Update drag URI for this row
+                let uri_cell: Option<std::ptr::NonNull<Rc<RefCell<String>>>> =
+                    unsafe { hbox.data::<Rc<RefCell<String>>>("drag-uri-cell") };
+                if let Some(ptr) = uri_cell {
+                    let cell = unsafe { ptr.as_ref() };
+                    if let Some(local) = entry.path.as_local_path() {
+                        *cell.borrow_mut() = format!("file://{}\r\n", local.display());
+                    } else {
+                        *cell.borrow_mut() = String::new();
+                    }
+                }
+
+                // Hover preview tooltip for directories
+                if entry.is_dir() {
+                    if let Some(local) = entry.path.as_local_path() {
+                        let tooltip = build_dir_preview_tooltip(local);
+                        hbox.set_tooltip_markup(Some(&tooltip));
+                    }
+                } else {
+                    hbox.set_tooltip_text(None);
+                }
+            }
+        });
+        name_factory.connect_unbind(|_, item| {
+            let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+            if let Some(hbox) = item.child().and_downcast::<gtk::Box>() {
+                hbox.set_tooltip_text(None);
             }
         });
         let name_col = gtk::ColumnViewColumn::new(Some("Name"), Some(name_factory));
@@ -291,18 +345,51 @@ impl FileListView {
                                 pane_id,
                             });
                         } else {
-                            // Open file with default application
-                            if let Some(local) = entry.path.as_local_path() {
-                                let uri = format!("file://{}", local.display());
-                                if let Err(e) = open::that(&uri) {
-                                    tracing::warn!("Failed to open {}: {}", uri, e);
-                                }
-                            }
+                            // Open file with configured or default application
+                            let config = state_for_activate.borrow().config.clone();
+                            crate::file_opener::open_file(&entry.path, &config);
                         }
                     }
                 }
             }
         });
+
+        // --- Drop target on column view (receive dropped files) ---
+        {
+            let drop_target = gtk::DropTarget::new(glib::types::Type::STRING, gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE);
+            let cmd_tx = command_tx.clone();
+            let state_for_drop = state.clone();
+            drop_target.connect_drop(move |_target, value, _x, _y| {
+                if let Ok(uri_list) = value.get::<String>() {
+                    let sources: Vec<RavenPath> = uri_list
+                        .lines()
+                        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                        .filter_map(|line| {
+                            let line = line.trim().trim_end_matches('\r');
+                            line.strip_prefix("file://")
+                                .map(|p| RavenPath::local(std::path::PathBuf::from(p)))
+                        })
+                        .collect();
+
+                    if sources.is_empty() {
+                        return false;
+                    }
+
+                    let destination = {
+                        let s = state_for_drop.borrow();
+                        s.active_tab().active_pane().current_path.clone()
+                    };
+
+                    let _ = cmd_tx.send(AppCommand::MoveFiles {
+                        sources,
+                        destination,
+                    });
+                    return true;
+                }
+                false
+            });
+            column_view.add_controller(drop_target);
+        }
 
         let scrolled_window = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Automatic)
@@ -349,4 +436,52 @@ impl FileListView {
             }
         }
     }
+}
+
+/// Build a Pango markup tooltip showing directory contents preview.
+fn build_dir_preview_tooltip(path: &Path) -> String {
+    let max_entries = 12;
+
+    let entries = match std::fs::read_dir(path) {
+        Ok(rd) => {
+            let mut items: Vec<(String, bool)> = Vec::new();
+            for entry in rd.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+                items.push((name, is_dir));
+            }
+            items
+        }
+        Err(_) => return "(cannot read directory)".to_string(),
+    };
+
+    if entries.is_empty() {
+        return "(empty directory)".to_string();
+    }
+
+    // Sort: directories first, then files, alphabetically within each group
+    let mut sorted = entries;
+    sorted.sort_by(|a, b| {
+        b.1.cmp(&a.1) // dirs first
+            .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+    });
+
+    let total = sorted.len();
+    let show = sorted.into_iter().take(max_entries);
+    let mut lines: Vec<String> = Vec::new();
+
+    for (name, is_dir) in show {
+        let escaped = glib::markup_escape_text(&name);
+        if is_dir {
+            lines.push(format!("<b>{}/</b>", escaped));
+        } else {
+            lines.push(escaped.to_string());
+        }
+    }
+
+    if total > max_entries {
+        lines.push(format!("...and {} more", total - max_entries));
+    }
+
+    lines.join("\n")
 }
