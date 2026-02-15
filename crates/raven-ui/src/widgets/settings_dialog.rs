@@ -6,9 +6,10 @@ use gtk::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 
-use raven_core::config::{AppConfig, FileAssociation, Keybinding};
+use raven_core::config::{AppConfig, FileAssociation, Keybinding, Theme};
 
 use crate::state::AppState;
+use crate::themes;
 
 /// Settings dialog with pages for general, appearance, keybindings, and file associations.
 pub struct SettingsDialog {
@@ -189,6 +190,34 @@ impl SettingsDialog {
         content.set_margin_end(24);
         content.set_margin_top(16);
         content.set_margin_bottom(16);
+
+        // Theme section
+        let theme_group = adw::PreferencesGroup::new();
+        theme_group.set_title("Theme");
+
+        let theme_row = adw::ComboRow::new();
+        theme_row.set_title("Color theme");
+        let theme_names: Vec<&str> = Theme::ALL.iter().map(|t| t.display_name()).collect();
+        let theme_model = gtk::StringList::new(&theme_names);
+        theme_row.set_model(Some(&theme_model));
+        let current_idx = Theme::ALL
+            .iter()
+            .position(|t| *t == config.appearance.theme)
+            .unwrap_or(0);
+        theme_row.set_selected(current_idx as u32);
+        {
+            let state = state.clone();
+            theme_row.connect_selected_notify(move |row| {
+                let idx = row.selected() as usize;
+                let theme = Theme::ALL.get(idx).copied().unwrap_or_default();
+                themes::apply_theme(theme);
+                let mut s = state.borrow_mut();
+                s.config.appearance.theme = theme;
+                let _ = s.config.save();
+            });
+        }
+        theme_group.add(&theme_row);
+        content.append(&theme_group);
 
         let layout_group = adw::PreferencesGroup::new();
         layout_group.set_title("Layout");

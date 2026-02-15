@@ -4,11 +4,14 @@ use gtk4 as gtk;
 use gtk::prelude::*;
 use libadwaita as adw;
 
+use libadwaita::prelude::*;
+
 use raven_core::commands::AppCommand;
 use raven_core::config::AppConfig;
 use raven_core::events::AppEvent;
 
 use crate::state::AppState;
+use crate::themes;
 use crate::window::RavenWindow;
 
 pub const APP_ID: &str = "com.ravenfilemanager.Raven";
@@ -47,7 +50,18 @@ impl RavenApplication {
         // Wrap event_rx in RefCell so the Fn closure can consume it once
         let event_rx = RefCell::new(self.event_rx.take());
 
+        let theme_state = state.clone();
+        let theme_loaded = RefCell::new(false);
+
         self.app.connect_activate(move |app| {
+            // Load CSS on first activation (display is now available)
+            if !*theme_loaded.borrow() {
+                *theme_loaded.borrow_mut() = true;
+                let theme = theme_state.borrow().config.appearance.theme;
+                themes::load_base_css();
+                themes::apply_theme(theme);
+            }
+
             let window = RavenWindow::new(app, state.clone(), command_tx.clone());
             window.present();
 

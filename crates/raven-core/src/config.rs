@@ -112,6 +112,50 @@ impl Default for GeneralConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Theme {
+    AdwaitaDark,
+    AdwaitaLight,
+    CatppuccinMocha,
+    CatppuccinLatte,
+    Nord,
+    Dracula,
+    Frost,
+    RosePine,
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self::CatppuccinMocha
+    }
+}
+
+impl Theme {
+    pub const ALL: &'static [Theme] = &[
+        Theme::AdwaitaDark,
+        Theme::AdwaitaLight,
+        Theme::CatppuccinMocha,
+        Theme::CatppuccinLatte,
+        Theme::Nord,
+        Theme::Dracula,
+        Theme::Frost,
+        Theme::RosePine,
+    ];
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Theme::AdwaitaDark => "Adwaita Dark",
+            Theme::AdwaitaLight => "Adwaita Light",
+            Theme::CatppuccinMocha => "Catppuccin Mocha",
+            Theme::CatppuccinLatte => "Catppuccin Latte",
+            Theme::Nord => "Nord",
+            Theme::Dracula => "Dracula",
+            Theme::Frost => "Frost",
+            Theme::RosePine => "Rosé Pine",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppearanceConfig {
     pub icon_size: u32,
@@ -121,6 +165,8 @@ pub struct AppearanceConfig {
     pub show_sidebar: bool,
     pub sidebar_width: i32,
     pub preview_panel_width: i32,
+    #[serde(default)]
+    pub theme: Theme,
 }
 
 impl Default for AppearanceConfig {
@@ -133,6 +179,7 @@ impl Default for AppearanceConfig {
             show_sidebar: true,
             sidebar_width: 200,
             preview_panel_width: 300,
+            theme: Theme::default(),
         }
     }
 }
