@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Virtual filesystem implementations for RavenFileManager"
 
+[features]
+default = ["sftp"]
+sftp = ["russh", "russh-sftp"]
+
 [dependencies]
 raven-core = { workspace = true }
 tokio = { workspace = true }
@@ -12,3 +16,8 @@ async-trait = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
+serde = { workspace = true }
+
+# SFTP dependencies (behind feature flag)
+russh = { version = "0.46", optional = true }
+russh-sftp = { version = "2.1", optional = true }

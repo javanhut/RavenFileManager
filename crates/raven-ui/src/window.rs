@@ -480,6 +480,156 @@ impl RavenWindow {
                 // TODO: update git status column in file list
             }
 
+            // --- Automation events ---
+            AppEvent::AutomationRuleTriggered {
+                rule_name,
+                matched_files,
+                ..
+            } => {
+                self.status_label.set_text(&format!(
+                    "Rule '{}' triggered on {} files",
+                    rule_name,
+                    matched_files.len()
+                ));
+            }
+
+            AppEvent::AutomationActionCompleted { rule_id, action } => {
+                tracing::info!("Automation rule {} completed action: {}", rule_id, action);
+            }
+
+            AppEvent::AutomationError { rule_id, error } => {
+                tracing::error!("Automation rule {} error: {}", rule_id, error);
+                self.status_label
+                    .set_text(&format!("Automation error: {}", error));
+            }
+
+            // --- Plugin events ---
+            AppEvent::PluginLoaded { name, .. } => {
+                tracing::info!("Plugin loaded: {}", name);
+            }
+
+            AppEvent::PluginUnloaded { plugin_id } => {
+                tracing::info!("Plugin unloaded: {}", plugin_id);
+            }
+
+            AppEvent::PluginError { plugin_id, error } => {
+                tracing::error!("Plugin {} error: {}", plugin_id, error);
+                self.status_label
+                    .set_text(&format!("Plugin error: {}", error));
+            }
+
+            // --- Network events ---
+            AppEvent::RemoteConnected {
+                protocol, host, ..
+            } => {
+                self.status_label
+                    .set_text(&format!("Connected to {} ({})", host, protocol));
+            }
+
+            AppEvent::RemoteDisconnected { id } => {
+                self.status_label
+                    .set_text(&format!("Disconnected from {}", id));
+            }
+
+            AppEvent::RemoteError { id, error } => {
+                tracing::error!("Remote {} error: {}", id, error);
+                self.status_label
+                    .set_text(&format!("Connection error: {}", error));
+            }
+
+            // --- System integration events ---
+            AppEvent::PackageOwnerResult { path, package } => {
+                let msg = match package {
+                    Some(pkg) => format!(
+                        "{}: {} {} ({})",
+                        path.display(),
+                        pkg.name,
+                        pkg.version,
+                        pkg.manager
+                    ),
+                    None => format!("{}: not owned by any package", path.display()),
+                };
+                self.status_label.set_text(&msg);
+            }
+
+            AppEvent::ProcessLocksResult { path, locks } => {
+                if locks.is_empty() {
+                    self.status_label
+                        .set_text(&format!("{}: no open file handles", path.display()));
+                } else {
+                    let names: Vec<String> = locks
+                        .iter()
+                        .map(|l| format!("{} (PID {})", l.process_name, l.pid))
+                        .collect();
+                    self.status_label.set_text(&format!(
+                        "{}: open by {}",
+                        path.display(),
+                        names.join(", ")
+                    ));
+                }
+            }
+
+            AppEvent::DiskUsageProgress { .. } => {
+                // Progress events are high-frequency; avoid updating UI for every one
+            }
+
+            AppEvent::DiskUsageCompleted {
+                path,
+                total_size,
+                total_items,
+            } => {
+                let size_str = format_size(total_size);
+                self.status_label.set_text(&format!(
+                    "{}: {} in {} items",
+                    path, size_str, total_items
+                ));
+            }
+
+            AppEvent::DiskUsageError { path, error } => {
+                self.status_label
+                    .set_text(&format!("Disk usage error for {}: {}", path, error));
+            }
+
+            AppEvent::ContainerInfoResult { info } => {
+                if info.is_container {
+                    let id_str = info
+                        .app_id
+                        .as_deref()
+                        .map(|id| format!(" ({})", id))
+                        .unwrap_or_default();
+                    tracing::info!(
+                        "Running inside {} container{}",
+                        info.container_type,
+                        id_str
+                    );
+                } else {
+                    tracing::info!("Not running inside a container");
+                }
+            }
+
+            AppEvent::SystemdUnitResult { path, unit } => {
+                let state = unit
+                    .active_state
+                    .as_deref()
+                    .unwrap_or("unknown");
+                let desc = unit
+                    .description
+                    .as_deref()
+                    .unwrap_or(&unit.name);
+                self.status_label.set_text(&format!(
+                    "{}: {} [{}]",
+                    path.display(),
+                    desc,
+                    state
+                ));
+            }
+
+            AppEvent::SystemError { error } => {
+                tracing::error!("System error: {}", error);
+                self.status_label
+                    .set_text(&format!("System error: {}", error));
+            }
+
             // --- Notifications ---
             AppEvent::Notification {
                 title,
@@ -554,5 +704,24 @@ fn navigate_up(
             }
         }
         let _ = command_tx.send(AppCommand::Navigate { path, pane_id });
+    }
+}
+
+fn format_size(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    const GIB: u64 = 1024 * MIB;
+    const TIB: u64 = 1024 * GIB;
+
+    if bytes >= TIB {
+        format!("{:.1} TiB", bytes as f64 / TIB as f64)
+    } else if bytes >= GIB {
+        format!("{:.1} GiB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{} B", bytes)
     }
 }

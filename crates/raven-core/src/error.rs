@@ -46,6 +46,21 @@ pub enum RavenError {
     #[error("preview error: {message}")]
     Preview { message: String },
 
+    #[error("automation error: {message}")]
+    Automation { message: String },
+
+    #[error("plugin error: {message}")]
+    Plugin { message: String },
+
+    #[error("dbus error: {message}")]
+    Dbus { message: String },
+
+    #[error("system error: {message}")]
+    System { message: String },
+
+    #[error("network error: {message}")]
+    Network { message: String },
+
     #[error("{message}")]
     Other { message: String },
 }

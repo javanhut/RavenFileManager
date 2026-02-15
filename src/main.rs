@@ -1,17 +1,29 @@
 use std::sync::Arc;
 
-use raven_core::commands::{AppCommand, SearchMode};
+use raven_automation::config as automation_config;
+use raven_automation::engine::AutomationEngine;
+use raven_core::commands::AppCommand;
+use raven_core::commands::SearchMode;
+use raven_core::config::AppConfig;
 use raven_core::entry::FileEntry;
 use raven_core::events::AppEvent;
 use raven_core::operations::{Operation, OperationId, OperationKind};
 use raven_core::sort::SortSpec;
 use raven_core::vfs::VirtualFileSystem;
+use raven_dbus::service::DbusService;
 use raven_ops::executor::{OperationExecutor, ProgressReporter};
 use raven_ops::queue::OperationQueue;
 use raven_ops::undo::UndoStack;
+use raven_plugin::api::MockPluginApi;
+use raven_plugin::manager::PluginManager;
 use raven_preview::router::PreviewRouter;
 use raven_search::content::{ContentSearchConfig, ContentSearcher};
 use raven_search::recursive::{RecursiveSearchConfig, RecursiveSearcher};
+use raven_system::container::ContainerInspector;
+use raven_system::disk_usage::DiskUsageCalculator;
+use raven_system::package_lookup::PackageLookup;
+use raven_system::process_lock::ProcessLockDetector;
+use raven_system::systemd::SystemdInspector;
 use raven_ui::app::RavenApplication;
 use raven_vfs::router::VfsRouter;
 
@@ -25,8 +37,11 @@ fn main() -> glib::ExitCode {
 
     tracing::info!("Starting Raven File Manager");
 
+    let config = AppConfig::load();
+
     let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel::<AppCommand>();
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+    let command_tx_for_dbus = command_tx.clone();
 
     // Spawn the Tokio runtime on a separate thread
     std::thread::spawn(move || {
@@ -36,7 +51,9 @@ fn main() -> glib::ExitCode {
             .expect("Failed to create Tokio runtime");
 
         rt.block_on(async move {
-            let vfs: Arc<dyn VirtualFileSystem> = Arc::new(VfsRouter::new());
+            // --- Core systems ---
+            let vfs_router = Arc::new(VfsRouter::new());
+            let vfs: Arc<dyn VirtualFileSystem> = vfs_router.clone();
             let queue = Arc::new(OperationQueue::new());
             let undo_stack = Arc::new(UndoStack::new());
             let executor = Arc::new(
@@ -46,16 +63,76 @@ fn main() -> glib::ExitCode {
             let preview_router = Arc::new(PreviewRouter::new());
             let next_op_id = Arc::new(std::sync::atomic::AtomicU64::new(1));
 
+            // --- Automation engine ---
+            let mut automation_engine = AutomationEngine::new(event_tx.clone());
+            let rules_dir = config
+                .automation
+                .rules_dir
+                .as_ref()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(automation_config::default_rules_dir);
+            let rules = automation_config::load_rules(&rules_dir);
+            for rule in rules {
+                automation_engine.add_rule(rule);
+            }
+            if config.automation.enabled {
+                automation_engine.start().await;
+                tracing::info!("Automation engine started");
+            }
+
+            // --- Plugin manager ---
+            let mut plugin_manager = PluginManager::new(event_tx.clone());
+            for dir in &config.plugins.plugin_dirs {
+                plugin_manager.add_plugin_dir(std::path::PathBuf::from(dir));
+            }
+            // Also add default plugin dirs
+            for dir in PluginManager::default_plugin_dirs() {
+                plugin_manager.add_plugin_dir(dir);
+            }
+            // Auto-load enabled plugins
+            let discovered = plugin_manager.discover();
+            let plugin_api = Arc::new(MockPluginApi::new());
+            for (dir, manifest) in &discovered {
+                if config.plugins.enabled_plugins.contains(&manifest.id)
+                    || config.plugins.enabled_plugins.is_empty()
+                {
+                    match plugin_manager.load_plugin(dir, plugin_api.clone()) {
+                        Ok(id) => tracing::info!("Loaded plugin: {}", id),
+                        Err(e) => tracing::warn!("Failed to load plugin from {:?}: {}", dir, e),
+                    }
+                }
+            }
+
+            // --- DBus service ---
+            let dbus_service = Arc::new(DbusService::new(
+                command_tx_for_dbus,
+                config.dbus.bus_name.clone(),
+            ));
+            if config.dbus.enabled {
+                tracing::info!(
+                    "DBus service initialized with bus name: {}",
+                    dbus_service.bus_name()
+                );
+            }
+
+            // --- System integration ---
+            let package_lookup = Arc::new(PackageLookup::new());
+            let disk_usage_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
             tracing::info!("Backend runtime started");
 
             while let Some(command) = command_rx.recv().await {
                 let event_tx = event_tx.clone();
                 let vfs = vfs.clone();
+                let vfs_router = vfs_router.clone();
                 let executor = executor.clone();
                 let queue = queue.clone();
                 let undo_stack = undo_stack.clone();
                 let preview_router = preview_router.clone();
                 let next_op_id = next_op_id.clone();
+                let dbus_service = dbus_service.clone();
+                let package_lookup = package_lookup.clone();
+                let disk_usage_cancel = disk_usage_cancel.clone();
 
                 match command {
                     // --- Navigation ---
@@ -65,11 +142,13 @@ fn main() -> glib::ExitCode {
                             match vfs.list_dir(&path).await {
                                 Ok(mut entries) => {
                                     sort_entries(&mut entries, &SortSpec::default());
-                                    let _ = event_tx.send(AppEvent::DirectoryLoaded {
+                                    let event = AppEvent::DirectoryLoaded {
                                         pane_id,
                                         path,
                                         entries,
-                                    });
+                                    };
+                                    dbus_service.handle_event(&event).await;
+                                    let _ = event_tx.send(event);
                                 }
                                 Err(e) => {
                                     let _ = event_tx.send(AppEvent::DirectoryError {
@@ -110,7 +189,9 @@ fn main() -> glib::ExitCode {
                             let reporter = make_progress_reporter(op_id, event_tx.clone());
                             match executor.execute(&op, vfs.as_ref(), Some(reporter)).await {
                                 Ok(()) => {
-                                    let _ = event_tx.send(AppEvent::OperationCompleted { id: op_id });
+                                    let event = AppEvent::OperationCompleted { id: op_id };
+                                    dbus_service.handle_event(&event).await;
+                                    let _ = event_tx.send(event);
                                 }
                                 Err(e) => {
                                     let _ = event_tx.send(AppEvent::OperationFailed {
@@ -149,7 +230,9 @@ fn main() -> glib::ExitCode {
                             let reporter = make_progress_reporter(op_id, event_tx.clone());
                             match executor.execute(&op, vfs.as_ref(), Some(reporter)).await {
                                 Ok(()) => {
-                                    let _ = event_tx.send(AppEvent::OperationCompleted { id: op_id });
+                                    let event = AppEvent::OperationCompleted { id: op_id };
+                                    dbus_service.handle_event(&event).await;
+                                    let _ = event_tx.send(event);
                                 }
                                 Err(e) => {
                                     let _ = event_tx.send(AppEvent::OperationFailed {
@@ -381,7 +464,6 @@ fn main() -> glib::ExitCode {
                                             let mut count = 0u64;
                                             while let Some(m) = rx.recv().await {
                                                 count += 1;
-                                                // Create a FileEntry for each match
                                                 let entry = raven_core::entry::FileEntry::new(
                                                     format!(
                                                         "{}:{} {}",
@@ -414,14 +496,11 @@ fn main() -> glib::ExitCode {
                     }
 
                     AppCommand::CancelSearch => {
-                        // Search cancellation is handled per-search via AtomicBool tokens
                         tracing::debug!("Search cancellation requested");
                     }
 
                     // --- Filter ---
                     AppCommand::SetFilter { filter, pane_id: _ } => {
-                        // Filter is applied UI-side by re-filtering the current entries
-                        // We send a notification back so the UI knows to update
                         let _ = event_tx.send(AppEvent::Notification {
                             title: "Filter applied".to_string(),
                             message: format!("Filter: {}", filter.query),
@@ -476,7 +555,7 @@ fn main() -> glib::ExitCode {
                         });
                     }
 
-                    // --- Refresh handled as Navigate ---
+                    // --- Refresh ---
                     AppCommand::Refresh { pane_id: _ } => {
                         tracing::debug!("Refresh not directly handled in backend");
                     }
@@ -490,8 +569,250 @@ fn main() -> glib::ExitCode {
                         tracing::debug!("Conflict resolution: {:?} for {:?}", strategy, id);
                     }
 
+                    // --- Automation ---
+                    AppCommand::StartAutomation => {
+                        automation_engine.start().await;
+                        tracing::info!("Automation engine started");
+                    }
+
+                    AppCommand::StopAutomation => {
+                        automation_engine.stop().await;
+                        tracing::info!("Automation engine stopped");
+                    }
+
+                    AppCommand::AddAutomationRule { rule } => {
+                        let rule_id = rule.id.clone();
+                        automation_engine.add_rule(rule);
+                        tracing::info!("Added automation rule: {}", rule_id);
+                    }
+
+                    AppCommand::RemoveAutomationRule { rule_id } => {
+                        if automation_engine.remove_rule(&rule_id) {
+                            tracing::info!("Removed automation rule: {}", rule_id);
+                        } else {
+                            tracing::warn!("Automation rule not found: {}", rule_id);
+                        }
+                    }
+
+                    AppCommand::EnableAutomationRule { rule_id } => {
+                        automation_engine.set_rule_enabled(&rule_id, true);
+                    }
+
+                    AppCommand::DisableAutomationRule { rule_id } => {
+                        automation_engine.set_rule_enabled(&rule_id, false);
+                    }
+
+                    AppCommand::TriggerAutomationRule { rule_id } => {
+                        automation_engine.trigger_rule(&rule_id).await;
+                    }
+
+                    // --- Plugins ---
+                    AppCommand::LoadPlugin { path } => {
+                        let api = Arc::new(MockPluginApi::new());
+                        match plugin_manager.load_plugin(&path, api) {
+                            Ok(id) => tracing::info!("Loaded plugin: {}", id),
+                            Err(e) => {
+                                let _ = event_tx.send(AppEvent::PluginError {
+                                    plugin_id: path.display().to_string(),
+                                    error: e,
+                                });
+                            }
+                        }
+                    }
+
+                    AppCommand::UnloadPlugin { plugin_id } => {
+                        match plugin_manager.unload_plugin(&plugin_id) {
+                            Ok(()) => tracing::info!("Unloaded plugin: {}", plugin_id),
+                            Err(e) => {
+                                let _ = event_tx.send(AppEvent::PluginError {
+                                    plugin_id,
+                                    error: e,
+                                });
+                            }
+                        }
+                    }
+
+                    // --- Network connections ---
+                    AppCommand::ConnectSftp {
+                        host,
+                        port,
+                        user,
+                        auth,
+                    } => {
+                        let host_clone = host.clone();
+                        tokio::spawn(async move {
+                            match vfs_router.connect_sftp(host.clone(), port, user.clone(), &auth).await {
+                                Ok(key) => {
+                                    let _ = event_tx.send(AppEvent::RemoteConnected {
+                                        id: key,
+                                        protocol: "sftp".to_string(),
+                                        host: host_clone,
+                                    });
+                                }
+                                Err(e) => {
+                                    let _ = event_tx.send(AppEvent::RemoteError {
+                                        id: format!("{}@{}:{}", user, host_clone, port),
+                                        error: e.to_string(),
+                                    });
+                                }
+                            }
+                        });
+                    }
+
+                    AppCommand::ConnectSmb {
+                        host,
+                        share,
+                        user: _,
+                        password: _,
+                    } => {
+                        let _ = event_tx.send(AppEvent::RemoteError {
+                            id: format!("smb://{}/{}", host, share),
+                            error: "SMB support not yet available".to_string(),
+                        });
+                    }
+
+                    AppCommand::DisconnectRemote { id } => {
+                        let vfs_router = vfs_router.clone();
+                        let id_clone = id.clone();
+                        tokio::spawn(async move {
+                            match vfs_router.disconnect_sftp(&id_clone).await {
+                                Ok(()) => {
+                                    let _ = event_tx.send(AppEvent::RemoteDisconnected {
+                                        id: id_clone,
+                                    });
+                                }
+                                Err(e) => {
+                                    let _ = event_tx.send(AppEvent::RemoteError {
+                                        id: id_clone,
+                                        error: e.to_string(),
+                                    });
+                                }
+                            }
+                        });
+                    }
+
+                    // --- System integration ---
+                    AppCommand::GetPackageOwner { path } => {
+                        tokio::spawn(async move {
+                            match package_lookup.query_owner(&path).await {
+                                Ok(package) => {
+                                    let _ = event_tx.send(AppEvent::PackageOwnerResult {
+                                        path,
+                                        package,
+                                    });
+                                }
+                                Err(e) => {
+                                    let _ = event_tx.send(AppEvent::SystemError {
+                                        error: e.to_string(),
+                                    });
+                                }
+                            }
+                        });
+                    }
+
+                    AppCommand::GetProcessLocks { path } => {
+                        tokio::spawn(async move {
+                            match ProcessLockDetector::check_locks(&path).await {
+                                Ok(locks) => {
+                                    let _ = event_tx.send(AppEvent::ProcessLocksResult {
+                                        path,
+                                        locks,
+                                    });
+                                }
+                                Err(e) => {
+                                    let _ = event_tx.send(AppEvent::SystemError {
+                                        error: e.to_string(),
+                                    });
+                                }
+                            }
+                        });
+                    }
+
+                    AppCommand::CalculateDiskUsage { path } => {
+                        disk_usage_cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+                        let cancel = disk_usage_cancel.clone();
+                        tokio::spawn(async move {
+                            let local_path = match path.as_local_path() {
+                                Some(p) => p.clone(),
+                                None => {
+                                    let _ = event_tx.send(AppEvent::DiskUsageError {
+                                        path,
+                                        error: "Disk usage only supported for local paths".into(),
+                                    });
+                                    return;
+                                }
+                            };
+                            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                            let path_for_task = path.clone();
+                            let event_tx_progress = event_tx.clone();
+
+                            // Forward streaming entries as progress events
+                            let forward_handle = tokio::spawn(async move {
+                                while let Some(entry) = rx.recv().await {
+                                    let _ = event_tx_progress.send(AppEvent::DiskUsageProgress {
+                                        path: path_for_task.clone(),
+                                        entry,
+                                    });
+                                }
+                            });
+
+                            match DiskUsageCalculator::calculate(&local_path, tx, cancel).await {
+                                Ok((total_size, total_items)) => {
+                                    let _ = forward_handle.await;
+                                    let _ = event_tx.send(AppEvent::DiskUsageCompleted {
+                                        path,
+                                        total_size,
+                                        total_items,
+                                    });
+                                }
+                                Err(e) => {
+                                    let _ = event_tx.send(AppEvent::DiskUsageError {
+                                        path,
+                                        error: e.to_string(),
+                                    });
+                                }
+                            }
+                        });
+                    }
+
+                    AppCommand::CancelDiskUsage => {
+                        disk_usage_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+
+                    AppCommand::GetContainerInfo => {
+                        tokio::spawn(async move {
+                            let info = ContainerInspector::detect().await;
+                            let _ = event_tx.send(AppEvent::ContainerInfoResult { info });
+                        });
+                    }
+
+                    AppCommand::InspectSystemdUnit { path } => {
+                        tokio::spawn(async move {
+                            match SystemdInspector::parse_unit_file(&path).await {
+                                Ok(mut unit) => {
+                                    // Also try to get the active state
+                                    if let Ok(Some(status)) =
+                                        SystemdInspector::get_unit_status(&unit.name).await
+                                    {
+                                        unit.active_state = Some(status);
+                                    }
+                                    let _ = event_tx.send(AppEvent::SystemdUnitResult {
+                                        path,
+                                        unit,
+                                    });
+                                }
+                                Err(e) => {
+                                    let _ = event_tx.send(AppEvent::SystemError {
+                                        error: e.to_string(),
+                                    });
+                                }
+                            }
+                        });
+                    }
+
                     AppCommand::Quit => {
                         tracing::info!("Backend received quit command");
+                        automation_engine.stop().await;
                         break;
                     }
                 }

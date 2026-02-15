@@ -1,3 +1,4 @@
+pub mod automation_types;
 pub mod commands;
 pub mod config;
 pub mod entry;
@@ -7,4 +8,5 @@ pub mod filter;
 pub mod operations;
 pub mod path;
 pub mod sort;
+pub mod system_types;
 pub mod vfs;

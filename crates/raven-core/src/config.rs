@@ -20,6 +20,12 @@ pub struct AppConfig {
     pub search: SearchConfig,
     #[serde(default)]
     pub bookmarks: Vec<Bookmark>,
+    #[serde(default)]
+    pub automation: AutomationConfig,
+    #[serde(default)]
+    pub plugins: PluginConfig,
+    #[serde(default)]
+    pub dbus: DbusConfig,
 }
 
 impl Default for AppConfig {
@@ -31,6 +37,9 @@ impl Default for AppConfig {
             operations: OperationsConfig::default(),
             preview: PreviewConfig::default(),
             search: SearchConfig::default(),
+            automation: AutomationConfig::default(),
+            plugins: PluginConfig::default(),
+            dbus: DbusConfig::default(),
             bookmarks: vec![
                 Bookmark {
                     name: "Home".to_string(),
@@ -199,6 +208,53 @@ pub struct Bookmark {
     pub name: String,
     pub path: String,
     pub icon: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutomationConfig {
+    pub enabled: bool,
+    pub rules_dir: Option<String>,
+}
+
+impl Default for AutomationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            rules_dir: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginConfig {
+    pub enabled: bool,
+    pub plugin_dirs: Vec<String>,
+    pub enabled_plugins: Vec<String>,
+}
+
+impl Default for PluginConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            plugin_dirs: Vec::new(),
+            enabled_plugins: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbusConfig {
+    pub enabled: bool,
+    pub bus_name: String,
+}
+
+impl Default for DbusConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            bus_name: "com.ravenfilemanager.Raven".to_string(),
+        }
+    }
 }
 
 impl AppConfig {

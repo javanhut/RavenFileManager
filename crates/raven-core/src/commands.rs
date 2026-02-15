@@ -1,3 +1,6 @@
+use std::path::PathBuf;
+
+use crate::automation_types::{AutomationRule, SshAuth};
 use crate::filter::FilterSpec;
 use crate::operations::{ConflictStrategy, OperationId};
 use crate::path::RavenPath;
@@ -97,6 +100,66 @@ pub enum AppCommand {
     // Git
     RefreshGitStatus {
         path: RavenPath,
+    },
+
+    // Automation
+    StartAutomation,
+    StopAutomation,
+    AddAutomationRule {
+        rule: AutomationRule,
+    },
+    RemoveAutomationRule {
+        rule_id: String,
+    },
+    EnableAutomationRule {
+        rule_id: String,
+    },
+    DisableAutomationRule {
+        rule_id: String,
+    },
+    TriggerAutomationRule {
+        rule_id: String,
+    },
+
+    // Plugins
+    LoadPlugin {
+        path: PathBuf,
+    },
+    UnloadPlugin {
+        plugin_id: String,
+    },
+
+    // Network connections
+    ConnectSftp {
+        host: String,
+        port: u16,
+        user: String,
+        auth: SshAuth,
+    },
+    ConnectSmb {
+        host: String,
+        share: String,
+        user: Option<String>,
+        password: Option<String>,
+    },
+    DisconnectRemote {
+        id: String,
+    },
+
+    // System integration
+    GetPackageOwner {
+        path: PathBuf,
+    },
+    GetProcessLocks {
+        path: PathBuf,
+    },
+    CalculateDiskUsage {
+        path: RavenPath,
+    },
+    CancelDiskUsage,
+    GetContainerInfo,
+    InspectSystemdUnit {
+        path: PathBuf,
     },
 
     // App lifecycle

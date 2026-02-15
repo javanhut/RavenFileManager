@@ -1,7 +1,10 @@
+use std::path::PathBuf;
+
 use crate::entry::FileEntry;
 use crate::error::RavenError;
 use crate::operations::{ConflictInfo, OperationId, OperationProgress};
 use crate::path::RavenPath;
+use crate::system_types::{ContainerInfo, PackageInfo, ProcessLock, SystemdUnit};
 
 /// Events sent from the backend Tokio runtime to the GTK UI thread.
 #[derive(Debug, Clone)]
@@ -63,6 +66,81 @@ pub enum AppEvent {
     GitStatusUpdated {
         path: RavenPath,
         statuses: Vec<GitFileStatusEntry>,
+    },
+
+    // Automation
+    AutomationRuleTriggered {
+        rule_id: String,
+        rule_name: String,
+        matched_files: Vec<String>,
+    },
+    AutomationActionCompleted {
+        rule_id: String,
+        action: String,
+    },
+    AutomationError {
+        rule_id: String,
+        error: String,
+    },
+
+    // Plugins
+    PluginLoaded {
+        plugin_id: String,
+        name: String,
+    },
+    PluginUnloaded {
+        plugin_id: String,
+    },
+    PluginError {
+        plugin_id: String,
+        error: String,
+    },
+
+    // Network connections
+    RemoteConnected {
+        id: String,
+        protocol: String,
+        host: String,
+    },
+    RemoteDisconnected {
+        id: String,
+    },
+    RemoteError {
+        id: String,
+        error: String,
+    },
+
+    // System integration
+    PackageOwnerResult {
+        path: PathBuf,
+        package: Option<PackageInfo>,
+    },
+    ProcessLocksResult {
+        path: PathBuf,
+        locks: Vec<ProcessLock>,
+    },
+    DiskUsageProgress {
+        path: RavenPath,
+        entry: crate::system_types::DiskUsageEntry,
+    },
+    DiskUsageCompleted {
+        path: RavenPath,
+        total_size: u64,
+        total_items: u64,
+    },
+    DiskUsageError {
+        path: RavenPath,
+        error: String,
+    },
+    ContainerInfoResult {
+        info: ContainerInfo,
+    },
+    SystemdUnitResult {
+        path: PathBuf,
+        unit: SystemdUnit,
+    },
+    SystemError {
+        error: String,
     },
 
     // Notifications

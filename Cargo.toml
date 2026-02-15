@@ -92,7 +92,11 @@ raven-vfs = { workspace = true }
 raven-ops = { workspace = true }
 raven-search = { workspace = true }
 raven-preview = { workspace = true }
+raven-automation = { workspace = true }
+raven-plugin = { workspace = true }
+raven-dbus = { workspace = true }
 raven-git = { workspace = true }
+raven-system = { workspace = true }
 raven-ui = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
