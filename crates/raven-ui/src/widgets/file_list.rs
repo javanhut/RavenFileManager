@@ -81,7 +81,7 @@ impl FileEntryObject {
     }
 }
 
-fn icon_for_entry(entry: &FileEntry) -> String {
+pub fn icon_for_entry(entry: &FileEntry) -> String {
     match entry.kind {
         EntryKind::Directory => "folder-symbolic".to_string(),
         EntryKind::Symlink => "emblem-symbolic-link-symbolic".to_string(),

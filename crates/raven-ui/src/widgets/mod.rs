@@ -1,7 +1,11 @@
+pub mod container_banner;
+pub mod context_menu;
 pub mod file_list;
 pub mod operation_panel;
 pub mod path_bar;
 pub mod preview_panel;
+pub mod properties_dialog;
 pub mod search_bar;
+pub mod settings_dialog;
 pub mod sidebar;
 pub mod tab_bar;

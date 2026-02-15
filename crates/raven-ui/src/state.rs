@@ -107,6 +107,13 @@ impl TabState {
     }
 }
 
+/// Clipboard operation for cut/copy/paste.
+#[derive(Debug, Clone)]
+pub enum ClipboardOp {
+    Copy(Vec<RavenPath>),
+    Cut(Vec<RavenPath>),
+}
+
 /// Inner state holding all application data — accessed via Rc<RefCell<>>.
 #[derive(Debug)]
 pub struct AppStateInner {
@@ -116,6 +123,7 @@ pub struct AppStateInner {
     pub show_hidden: bool,
     pub show_preview: bool,
     pub preview_path: Option<RavenPath>,
+    pub clipboard: Option<ClipboardOp>,
     next_tab_id: u32,
 }
 
@@ -139,6 +147,7 @@ impl AppStateInner {
             show_hidden: false,
             show_preview: false,
             preview_path: None,
+            clipboard: None,
             next_tab_id: 1,
         }
     }

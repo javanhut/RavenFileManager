@@ -26,6 +26,10 @@ pub struct AppConfig {
     pub plugins: PluginConfig,
     #[serde(default)]
     pub dbus: DbusConfig,
+    #[serde(default)]
+    pub keybindings: KeybindingsConfig,
+    #[serde(default)]
+    pub file_associations: Vec<FileAssociation>,
 }
 
 impl Default for AppConfig {
@@ -40,6 +44,8 @@ impl Default for AppConfig {
             automation: AutomationConfig::default(),
             plugins: PluginConfig::default(),
             dbus: DbusConfig::default(),
+            keybindings: KeybindingsConfig::default(),
+            file_associations: Vec::new(),
             bookmarks: vec![
                 Bookmark {
                     name: "Home".to_string(),
@@ -255,6 +261,67 @@ impl Default for DbusConfig {
             bus_name: "com.ravenfilemanager.Raven".to_string(),
         }
     }
+}
+
+/// A single keybinding mapping an action to a key combination.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Keybinding {
+    pub action: String,
+    pub key: String,
+    pub modifiers: Vec<String>,
+}
+
+/// Custom keybinding configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeybindingsConfig {
+    #[serde(default = "default_keybindings")]
+    pub bindings: Vec<Keybinding>,
+}
+
+impl Default for KeybindingsConfig {
+    fn default() -> Self {
+        Self {
+            bindings: default_keybindings(),
+        }
+    }
+}
+
+fn default_keybindings() -> Vec<Keybinding> {
+    vec![
+        Keybinding { action: "navigate_back".into(), key: "Left".into(), modifiers: vec!["Alt".into()] },
+        Keybinding { action: "navigate_forward".into(), key: "Right".into(), modifiers: vec!["Alt".into()] },
+        Keybinding { action: "navigate_up".into(), key: "Up".into(), modifiers: vec!["Alt".into()] },
+        Keybinding { action: "new_tab".into(), key: "t".into(), modifiers: vec!["Ctrl".into()] },
+        Keybinding { action: "close_tab".into(), key: "w".into(), modifiers: vec!["Ctrl".into()] },
+        Keybinding { action: "toggle_hidden".into(), key: "h".into(), modifiers: vec!["Ctrl".into()] },
+        Keybinding { action: "toggle_search".into(), key: "f".into(), modifiers: vec!["Ctrl".into()] },
+        Keybinding { action: "edit_path".into(), key: "l".into(), modifiers: vec!["Ctrl".into()] },
+        Keybinding { action: "refresh".into(), key: "r".into(), modifiers: vec!["Ctrl".into()] },
+        Keybinding { action: "undo".into(), key: "z".into(), modifiers: vec!["Ctrl".into()] },
+        Keybinding { action: "toggle_preview".into(), key: "space".into(), modifiers: vec![] },
+        Keybinding { action: "properties".into(), key: "i".into(), modifiers: vec!["Ctrl".into()] },
+        Keybinding { action: "rename".into(), key: "F2".into(), modifiers: vec![] },
+        Keybinding { action: "trash".into(), key: "Delete".into(), modifiers: vec![] },
+        Keybinding { action: "copy".into(), key: "c".into(), modifiers: vec!["Ctrl".into()] },
+        Keybinding { action: "cut".into(), key: "x".into(), modifiers: vec!["Ctrl".into()] },
+        Keybinding { action: "paste".into(), key: "v".into(), modifiers: vec!["Ctrl".into()] },
+        Keybinding { action: "select_all".into(), key: "a".into(), modifiers: vec!["Ctrl".into()] },
+        Keybinding { action: "open_settings".into(), key: "comma".into(), modifiers: vec!["Ctrl".into()] },
+    ]
+}
+
+/// A file association mapping MIME types or extensions to a specific application.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileAssociation {
+    /// MIME type pattern (e.g., "text/plain", "image/*", "application/pdf")
+    pub mime_pattern: String,
+    /// File extensions this applies to (e.g., ["rs", "py", "js"])
+    #[serde(default)]
+    pub extensions: Vec<String>,
+    /// Application command to use (e.g., "code", "gimp %f", "vlc %f")
+    pub application: String,
+    /// Human-readable name for the application
+    pub label: String,
 }
 
 impl AppConfig {
