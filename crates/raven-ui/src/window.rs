@@ -1148,6 +1148,142 @@ impl RavenWindow {
                 }
             }
 
+            // --- Filter ---
+            AppEvent::FilterApplied { filter, pane_id } => {
+                let (entries, show_hidden) = {
+                    let s = self.state.borrow();
+                    let entries = s
+                        .pane_by_id(pane_id)
+                        .map(|p| p.entries.clone())
+                        .unwrap_or_default();
+                    (entries, s.show_hidden)
+                };
+
+                if filter.is_empty() {
+                    // Clear filter: show all entries
+                    self.file_list.set_entries(&entries, show_hidden);
+                    self.status_label.set_text(&format!("{} items", entries.len()));
+                } else {
+                    let filtered: Vec<_> = entries
+                        .into_iter()
+                        .filter(|entry| {
+                            // Query substring match on name
+                            if !filter.query.is_empty()
+                                && !entry
+                                    .name
+                                    .to_lowercase()
+                                    .contains(&filter.query.to_lowercase())
+                            {
+                                return false;
+                            }
+
+                            // File type filter
+                            if !filter.file_types.is_empty() {
+                                let matches_type = filter.file_types.iter().any(|ft| match ft {
+                                    raven_core::filter::FileTypeFilter::Files => entry.is_file(),
+                                    raven_core::filter::FileTypeFilter::Directories => {
+                                        entry.is_dir()
+                                    }
+                                    raven_core::filter::FileTypeFilter::Symlinks => {
+                                        entry.kind
+                                            == raven_core::entry::EntryKind::Symlink
+                                    }
+                                    raven_core::filter::FileTypeFilter::Images => matches!(
+                                        entry.extension(),
+                                        Some(
+                                            "jpg" | "jpeg" | "png" | "gif" | "bmp"
+                                                | "svg" | "webp" | "tiff" | "raw"
+                                                | "ico"
+                                        )
+                                    ),
+                                    raven_core::filter::FileTypeFilter::Videos => matches!(
+                                        entry.extension(),
+                                        Some(
+                                            "mp4" | "mkv" | "avi" | "mov" | "wmv"
+                                                | "flv" | "webm"
+                                        )
+                                    ),
+                                    raven_core::filter::FileTypeFilter::Audio => matches!(
+                                        entry.extension(),
+                                        Some(
+                                            "mp3" | "flac" | "ogg" | "wav" | "aac"
+                                                | "wma" | "m4a" | "opus"
+                                        )
+                                    ),
+                                    raven_core::filter::FileTypeFilter::Documents => matches!(
+                                        entry.extension(),
+                                        Some(
+                                            "pdf" | "doc" | "docx" | "odt" | "txt"
+                                                | "rtf" | "md" | "tex" | "epub"
+                                        )
+                                    ),
+                                    raven_core::filter::FileTypeFilter::Archives => matches!(
+                                        entry.extension(),
+                                        Some(
+                                            "zip" | "tar" | "gz" | "bz2" | "xz"
+                                                | "7z" | "rar" | "zst"
+                                        )
+                                    ),
+                                    raven_core::filter::FileTypeFilter::Custom(_) => true,
+                                });
+                                if !matches_type {
+                                    return false;
+                                }
+                            }
+
+                            // Size filters
+                            if let Some(min) = filter.min_size {
+                                if entry.metadata.size < min {
+                                    return false;
+                                }
+                            }
+                            if let Some(max) = filter.max_size {
+                                if entry.metadata.size > max {
+                                    return false;
+                                }
+                            }
+
+                            // Date filters
+                            if let Some(after) = filter.modified_after {
+                                match entry.metadata.modified {
+                                    Some(m) if m >= after => {}
+                                    _ => return false,
+                                }
+                            }
+                            if let Some(before) = filter.modified_before {
+                                match entry.metadata.modified {
+                                    Some(m) if m <= before => {}
+                                    _ => return false,
+                                }
+                            }
+
+                            // Extension filter
+                            if !filter.extensions.is_empty() {
+                                match entry.extension() {
+                                    Some(ext) => {
+                                        if !filter
+                                            .extensions
+                                            .iter()
+                                            .any(|e| e.eq_ignore_ascii_case(ext))
+                                        {
+                                            return false;
+                                        }
+                                    }
+                                    None => return false,
+                                }
+                            }
+
+                            true
+                        })
+                        .collect();
+
+                    let count = filtered.len();
+                    self.file_list.set_entries(&filtered, show_hidden);
+                    self.status_label
+                        .set_text(&format!("{} items (filtered)", count));
+                }
+            }
+
             // --- Directory size updates ---
             AppEvent::DirSizeCalculated {
                 pane_id,

@@ -243,7 +243,7 @@ impl FileListView {
                 if entry.is_dir() {
                     if let Some(local) = entry.path.as_local_path() {
                         let tooltip = build_dir_preview_tooltip(local);
-                        hbox.set_tooltip_markup(Some(&tooltip));
+                        hbox.set_tooltip_text(Some(&tooltip));
                     }
                 } else {
                     hbox.set_tooltip_text(None);
@@ -438,7 +438,7 @@ impl FileListView {
     }
 }
 
-/// Build a Pango markup tooltip showing directory contents preview.
+/// Build a plain-text tooltip showing directory contents preview.
 fn build_dir_preview_tooltip(path: &Path) -> String {
     let max_entries = 12;
 
@@ -446,7 +446,13 @@ fn build_dir_preview_tooltip(path: &Path) -> String {
         Ok(rd) => {
             let mut items: Vec<(String, bool)> = Vec::new();
             for entry in rd.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
+                // Sanitize: remove NUL bytes that crash GStr
+                let name: String = entry
+                    .file_name()
+                    .to_string_lossy()
+                    .chars()
+                    .filter(|c| *c != '\0')
+                    .collect();
                 let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
                 items.push((name, is_dir));
             }
@@ -471,11 +477,10 @@ fn build_dir_preview_tooltip(path: &Path) -> String {
     let mut lines: Vec<String> = Vec::new();
 
     for (name, is_dir) in show {
-        let escaped = glib::markup_escape_text(&name);
         if is_dir {
-            lines.push(format!("<b>{}/</b>", escaped));
+            lines.push(format!("{}/", name));
         } else {
-            lines.push(escaped.to_string());
+            lines.push(name);
         }
     }
 
