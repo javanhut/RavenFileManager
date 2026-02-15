@@ -9,10 +9,11 @@ use raven_core::path::RavenPath;
 
 use crate::state::AppState;
 
-/// Sidebar with bookmarks and mounted volumes.
+/// Sidebar with bookmarks, mounted volumes, and tags.
 pub struct Sidebar {
     pub widget: gtk::Box,
     bookmarks_list: gtk::ListBox,
+    tags_list: gtk::ListBox,
     command_tx: tokio::sync::mpsc::UnboundedSender<AppCommand>,
     pane_id: u32,
     state: AppState,
@@ -95,12 +96,84 @@ impl Sidebar {
 
         widget.append(&volume_list);
 
+        // Separator before tags
+        let sep2 = gtk::Separator::new(gtk::Orientation::Horizontal);
+        sep2.set_margin_top(12);
+        sep2.set_margin_bottom(12);
+        widget.append(&sep2);
+
+        // Tags section
+        let tags_label = gtk::Label::new(Some("Tags"));
+        tags_label.set_halign(gtk::Align::Start);
+        tags_label.add_css_class("heading");
+        tags_label.set_margin_start(12);
+        tags_label.set_margin_bottom(6);
+        widget.append(&tags_label);
+
+        let tags_list = gtk::ListBox::new();
+        tags_list.set_selection_mode(gtk::SelectionMode::Single);
+        tags_list.add_css_class("navigation-sidebar");
+        widget.append(&tags_list);
+
         Self {
             widget,
             bookmarks_list,
+            tags_list,
             command_tx,
             pane_id,
             state,
+        }
+    }
+
+    /// Update the tags section with new counts.
+    pub fn update_tag_counts(&self, counts: &[(String, usize)]) {
+        // Clear existing tag rows
+        while let Some(child) = self.tags_list.first_child() {
+            self.tags_list.remove(&child);
+        }
+
+        for (tag_name, count) in counts {
+            if *count == 0 {
+                continue;
+            }
+            let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            hbox.set_margin_start(8);
+            hbox.set_margin_end(8);
+            hbox.set_margin_top(4);
+            hbox.set_margin_bottom(4);
+
+            let icon = gtk::Image::from_icon_name("tag-symbolic");
+            icon.set_pixel_size(16);
+            hbox.append(&icon);
+
+            let lbl = gtk::Label::new(Some(tag_name));
+            lbl.set_halign(gtk::Align::Start);
+            lbl.set_hexpand(true);
+            lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            hbox.append(&lbl);
+
+            let count_lbl = gtk::Label::new(Some(&count.to_string()));
+            count_lbl.add_css_class("dim-label");
+            hbox.append(&count_lbl);
+
+            let row = gtk::ListBoxRow::new();
+            row.set_child(Some(&hbox));
+
+            // Click to filter by tag
+            let cmd_tx = self.command_tx.clone();
+            let tag = tag_name.clone();
+            let pane_id = self.pane_id;
+            let gesture = gtk::GestureClick::new();
+            gesture.set_button(1);
+            gesture.connect_released(move |_, _, _, _| {
+                let _ = cmd_tx.send(AppCommand::FilterByTag {
+                    tag: tag.clone(),
+                    pane_id,
+                });
+            });
+            row.add_controller(gesture);
+
+            self.tags_list.append(&row);
         }
     }
 

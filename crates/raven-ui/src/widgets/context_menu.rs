@@ -11,6 +11,7 @@ pub struct FileContextMenu {
     pub popover: gtk::PopoverMenu,
     menu: gio::Menu,
     open_with_section: gio::Menu,
+    tag_section: gio::Menu,
 }
 
 impl FileContextMenu {
@@ -40,6 +41,17 @@ impl FileContextMenu {
         sidebar_section.append(Some("Pin to Sidebar"), Some("file.pin_to_sidebar"));
         menu.append_section(None, &sidebar_section);
 
+        // Tag submenu (dynamically populated)
+        let tag_section = gio::Menu::new();
+        let tag_submenu = gio::MenuItem::new_submenu(Some("Tag"), &tag_section);
+        menu.append_item(&tag_submenu);
+
+        // AI section
+        let ai_section = gio::Menu::new();
+        ai_section.append(Some("Find Duplicates..."), Some("file.find_duplicates"));
+        ai_section.append(Some("Suggest Organization..."), Some("file.suggest_organization"));
+        menu.append_section(None, &ai_section);
+
         // Destructive section
         let delete_section = gio::Menu::new();
         delete_section.append(Some("Move to Trash"), Some("file.trash"));
@@ -58,6 +70,7 @@ impl FileContextMenu {
             popover,
             menu,
             open_with_section,
+            tag_section,
         }
     }
 
@@ -76,6 +89,28 @@ impl FileContextMenu {
         if matches.is_empty() {
             self.open_with_section
                 .append(Some("(no associations configured)"), None);
+        }
+    }
+
+    /// Update the "Tag" submenu with available tags and current file's tags.
+    pub fn update_tags(&self, all_tags: &[String], current_tags: &[String]) {
+        self.tag_section.remove_all();
+
+        if all_tags.is_empty() {
+            self.tag_section
+                .append(Some("(no tags defined)"), None);
+            return;
+        }
+
+        for (i, tag) in all_tags.iter().enumerate() {
+            let is_tagged = current_tags.contains(tag);
+            let label = if is_tagged {
+                format!("\u{2713} {}", tag)
+            } else {
+                tag.clone()
+            };
+            let action_name = format!("file.toggle-tag-{}", i);
+            self.tag_section.append(Some(&label), Some(&action_name));
         }
     }
 }

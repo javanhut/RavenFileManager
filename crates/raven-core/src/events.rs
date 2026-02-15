@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::ai_types::{DuplicateGroup, DuplicateScanProgress, OrganizeSuggestion};
 use crate::entry::FileEntry;
 use crate::error::RavenError;
 use crate::operations::{ConflictInfo, OperationId, OperationProgress};
@@ -141,6 +142,25 @@ pub enum AppEvent {
     },
     SystemError {
         error: String,
+    },
+
+    // AI features
+    DuplicateScanProgress {
+        progress: DuplicateScanProgress,
+    },
+    DuplicateScanCompleted {
+        groups: Vec<DuplicateGroup>,
+    },
+    DuplicateScanError {
+        error: String,
+    },
+    TagCountsUpdated {
+        pane_id: u32,
+        counts: Vec<(String, usize)>,
+    },
+    OrganizationAnalysisComplete {
+        path: RavenPath,
+        suggestions: Vec<OrganizeSuggestion>,
     },
 
     // Directory size (async calculation for listing)

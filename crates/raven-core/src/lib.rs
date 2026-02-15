@@ -1,3 +1,4 @@
+pub mod ai_types;
 pub mod automation_types;
 pub mod commands;
 pub mod config;

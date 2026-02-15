@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -7,6 +8,12 @@ pub struct FilterSpec {
     pub file_types: Vec<FileTypeFilter>,
     pub min_size: Option<u64>,
     pub max_size: Option<u64>,
+    #[serde(default)]
+    pub modified_after: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub modified_before: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub extensions: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +42,12 @@ impl FilterSpec {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.query.is_empty() && self.file_types.is_empty() && self.min_size.is_none() && self.max_size.is_none()
+        self.query.is_empty()
+            && self.file_types.is_empty()
+            && self.min_size.is_none()
+            && self.max_size.is_none()
+            && self.modified_after.is_none()
+            && self.modified_before.is_none()
+            && self.extensions.is_empty()
     }
 }

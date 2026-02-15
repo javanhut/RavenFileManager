@@ -4,7 +4,7 @@ use gtk::prelude::*;
 use raven_core::commands::{AppCommand, SearchMode};
 use raven_core::path::RavenPath;
 
-/// Search bar with mode selector (filter/filename/content search).
+/// Search bar with mode selector (filter/filename/content/smart search).
 pub struct SearchBar {
     pub revealer: gtk::Revealer,
     entry: gtk::SearchEntry,
@@ -27,7 +27,7 @@ impl SearchBar {
         hbox.set_margin_bottom(4);
 
         // Search mode dropdown
-        let modes = gtk::StringList::new(&["Filter", "Filename", "Content"]);
+        let modes = gtk::StringList::new(&["Filter", "Filename", "Content", "Smart"]);
         let mode_dropdown = gtk::DropDown::new(Some(modes), gtk::Expression::NONE);
         mode_dropdown.set_selected(0);
         hbox.append(&mode_dropdown);
@@ -51,7 +51,7 @@ impl SearchBar {
 
         revealer.set_child(Some(&hbox));
 
-        // Handle search on Enter or text change
+        // Handle search on Enter
         let cmd_tx = command_tx.clone();
         let mode = mode_dropdown.clone();
         entry.connect_activate(move |entry| {
@@ -71,6 +71,26 @@ impl SearchBar {
                 }
                 1 => SearchMode::Filename,
                 2 => SearchMode::Content,
+                3 => {
+                    // Smart mode: parse NL query, decide filter vs recursive search
+                    let parsed = raven_ai::nl_search::parse_nl_query(&query);
+                    if parsed.needs_recursive {
+                        if let Some(path) = get_current_path() {
+                            let _ = cmd_tx.send(AppCommand::Search {
+                                query,
+                                path,
+                                search_mode: SearchMode::NaturalLanguage,
+                            });
+                        }
+                    } else {
+                        let filter = raven_ai::nl_search::parsed_to_filter(&parsed);
+                        let _ = cmd_tx.send(AppCommand::SetFilter {
+                            filter,
+                            pane_id,
+                        });
+                    }
+                    return;
+                }
                 _ => SearchMode::Filename,
             };
 

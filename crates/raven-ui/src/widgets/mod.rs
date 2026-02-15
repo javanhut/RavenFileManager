@@ -1,7 +1,9 @@
 pub mod container_banner;
 pub mod context_menu;
+pub mod duplicate_dialog;
 pub mod file_list;
 pub mod operation_panel;
+pub mod organize_dialog;
 pub mod path_bar;
 pub mod preview_panel;
 pub mod properties_dialog;

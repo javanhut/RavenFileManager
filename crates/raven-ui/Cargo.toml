@@ -6,6 +6,7 @@ license.workspace = true
 description = "GTK4 + Libadwaita UI for RavenFileManager"
 
 [dependencies]
+raven-ai = { workspace = true }
 raven-core = { workspace = true }
 raven-vfs = { workspace = true }
 raven-ops = { workspace = true }

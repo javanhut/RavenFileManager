@@ -13,8 +13,10 @@ use raven_core::path::RavenPath;
 use crate::state::{AppState, ClipboardOp};
 use crate::widgets::container_banner::ContainerBanner;
 use crate::widgets::context_menu::FileContextMenu;
+use crate::widgets::duplicate_dialog::DuplicateDialog;
 use crate::widgets::file_list::FileListView;
 use crate::widgets::operation_panel::OperationPanel;
+use crate::widgets::organize_dialog::OrganizeDialog;
 use crate::widgets::path_bar::PathBar;
 use crate::widgets::preview_panel::PreviewPanel;
 use crate::widgets::properties_dialog::PropertiesDialog;
@@ -45,6 +47,9 @@ pub struct RavenWindow {
     context_menu: Rc<FileContextMenu>,
     // Sidebar (for dynamic bookmark pinning)
     sidebar: Rc<Sidebar>,
+    // AI dialogs
+    duplicate_dialog: Rc<RefCell<Option<Rc<DuplicateDialog>>>>,
+    organize_dialog: Rc<RefCell<Option<Rc<OrganizeDialog>>>>,
 }
 
 impl RavenWindow {
@@ -360,6 +365,74 @@ impl RavenWindow {
                             };
                             sidebar.add_bookmark(&bookmark);
                         }
+                    }
+                }
+            });
+            action_group.add_action(&action);
+        }
+
+        // file.find_duplicates
+        let duplicate_dialog: Rc<RefCell<Option<Rc<DuplicateDialog>>>> =
+            Rc::new(RefCell::new(None));
+        {
+            let cmd_tx = command_tx.clone();
+            let state = state.clone();
+            let window_ref = window.clone();
+            let duplicate_dialog = duplicate_dialog.clone();
+            let action = gio::SimpleAction::new("find_duplicates", None);
+            action.connect_activate(move |_, _| {
+                let path = {
+                    let s = state.borrow();
+                    s.active_tab().active_pane().current_path.clone()
+                };
+                let dialog = Rc::new(DuplicateDialog::new(&window_ref, cmd_tx.clone()));
+                dialog.present();
+                *duplicate_dialog.borrow_mut() = Some(dialog);
+                let _ = cmd_tx.send(AppCommand::ScanDuplicates {
+                    path,
+                    recursive: true,
+                    min_size: 1,
+                });
+            });
+            action_group.add_action(&action);
+        }
+
+        // file.suggest_organization
+        let organize_dialog: Rc<RefCell<Option<Rc<OrganizeDialog>>>> =
+            Rc::new(RefCell::new(None));
+        {
+            let cmd_tx = command_tx.clone();
+            let state = state.clone();
+            let window_ref = window.clone();
+            let organize_dialog = organize_dialog.clone();
+            let action = gio::SimpleAction::new("suggest_organization", None);
+            action.connect_activate(move |_, _| {
+                let path = {
+                    let s = state.borrow();
+                    s.active_tab().active_pane().current_path.clone()
+                };
+                let dialog = Rc::new(OrganizeDialog::new(&window_ref, cmd_tx.clone()));
+                dialog.present();
+                *organize_dialog.borrow_mut() = Some(dialog);
+                let _ = cmd_tx.send(AppCommand::AnalyzeOrganization { path });
+            });
+            action_group.add_action(&action);
+        }
+
+        // file.toggle-tag-N actions (support up to 20 tags)
+        for tag_idx in 0..20 {
+            let file_list = file_list.clone();
+            let cmd_tx = command_tx.clone();
+            let action = gio::SimpleAction::new(&format!("toggle-tag-{}", tag_idx), None);
+            action.connect_activate(move |_, _| {
+                if let Some(entry) = get_selected_entry(&file_list) {
+                    if let Some(local) = entry.path.as_local_path() {
+                        // Tag names are loaded dynamically; use index-based approach
+                        // The actual tag name resolution is done in the backend
+                        let _ = cmd_tx.send(AppCommand::AddManualTag {
+                            path: local.to_path_buf(),
+                            tag: format!("__tag_idx_{}", tag_idx),
+                        });
                     }
                 }
             });
@@ -712,6 +785,8 @@ impl RavenWindow {
             properties_dialog,
             context_menu,
             sidebar,
+            duplicate_dialog,
+            organize_dialog,
         }
     }
 
@@ -750,6 +825,9 @@ impl RavenWindow {
                     format!("{} items", count)
                 };
                 self.status_label.set_text(&status);
+
+                // Refresh tag counts for the loaded directory
+                let _ = self.command_tx.send(AppCommand::RefreshTagCounts { pane_id });
             }
 
             AppEvent::DirectoryError { path, error, .. } => {
@@ -1034,6 +1112,40 @@ impl RavenWindow {
                 tracing::error!("System error: {}", error);
                 self.status_label
                     .set_text(&format!("System error: {}", error));
+            }
+
+            // --- AI events ---
+            AppEvent::DuplicateScanProgress { progress } => {
+                if let Some(ref dialog) = *self.duplicate_dialog.borrow() {
+                    dialog.update_progress(&progress);
+                }
+            }
+
+            AppEvent::DuplicateScanCompleted { groups } => {
+                if let Some(ref dialog) = *self.duplicate_dialog.borrow() {
+                    dialog.set_results(&groups);
+                }
+            }
+
+            AppEvent::DuplicateScanError { error } => {
+                if let Some(ref dialog) = *self.duplicate_dialog.borrow() {
+                    dialog.set_error(&error);
+                }
+                self.status_label
+                    .set_text(&format!("Duplicate scan error: {}", error));
+            }
+
+            AppEvent::TagCountsUpdated { pane_id: _, counts } => {
+                self.sidebar.update_tag_counts(&counts);
+            }
+
+            AppEvent::OrganizationAnalysisComplete {
+                path: _,
+                suggestions,
+            } => {
+                if let Some(ref dialog) = *self.organize_dialog.borrow() {
+                    dialog.set_suggestions(suggestions);
+                }
             }
 
             // --- Directory size updates ---

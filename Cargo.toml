@@ -76,6 +76,9 @@ open = "5"
 # Hashing
 blake3 = "1"
 
+# Testing
+tempfile = "3"
+
 [package]
 name = "raven-file-manager"
 version.workspace = true
@@ -97,6 +100,7 @@ raven-plugin = { workspace = true }
 raven-dbus = { workspace = true }
 raven-git = { workspace = true }
 raven-system = { workspace = true }
+raven-ai = { workspace = true }
 raven-ui = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

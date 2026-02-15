@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::ai_types::OrganizeSuggestion;
 use crate::automation_types::{AutomationRule, SshAuth};
 use crate::filter::FilterSpec;
 use crate::operations::{ConflictStrategy, OperationId};
@@ -162,6 +163,35 @@ pub enum AppCommand {
         path: PathBuf,
     },
 
+    // AI features
+    ScanDuplicates {
+        path: RavenPath,
+        recursive: bool,
+        min_size: u64,
+    },
+    CancelDuplicateScan,
+    RefreshTagCounts {
+        pane_id: u32,
+    },
+    AddManualTag {
+        path: PathBuf,
+        tag: String,
+    },
+    RemoveManualTag {
+        path: PathBuf,
+        tag: String,
+    },
+    FilterByTag {
+        tag: String,
+        pane_id: u32,
+    },
+    AnalyzeOrganization {
+        path: RavenPath,
+    },
+    ApplyOrganization {
+        suggestions: Vec<OrganizeSuggestion>,
+    },
+
     // App lifecycle
     Quit,
 }
@@ -171,4 +201,5 @@ pub enum SearchMode {
     Filename,
     Content,
     Regex,
+    NaturalLanguage,
 }

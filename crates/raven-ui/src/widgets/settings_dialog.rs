@@ -64,6 +64,11 @@ impl SettingsDialog {
             Some("associations"),
             "File Associations",
         );
+        stack.add_titled(
+            &Self::build_tags_page(state.clone()),
+            Some("tags"),
+            "Tags",
+        );
 
         let content_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         content_box.append(&sidebar);
@@ -504,6 +509,76 @@ impl SettingsDialog {
         row
     }
 
+    fn build_tags_page(state: AppState) -> gtk::ScrolledWindow {
+        let scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .build();
+
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 16);
+        content.set_margin_start(24);
+        content.set_margin_end(24);
+        content.set_margin_top(16);
+        content.set_margin_bottom(16);
+
+        let group = adw::PreferencesGroup::new();
+        group.set_title("Tag Rules");
+        group.set_description(Some(
+            "Tags are automatically applied based on rules. Smart tags use file metadata.",
+        ));
+
+        let tags_dir = dirs_config_path().join("tags.toml");
+        let engine = raven_ai::tag_engine::TagEngine::new(tags_dir);
+        let rules = engine.tag_rules().to_vec();
+
+        let list_box = Rc::new(gtk::ListBox::new());
+        list_box.set_selection_mode(gtk::SelectionMode::None);
+        list_box.add_css_class("boxed-list");
+
+        for rule in &rules {
+            let row = gtk::ListBoxRow::new();
+            row.set_activatable(false);
+
+            let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+            hbox.set_margin_start(12);
+            hbox.set_margin_end(12);
+            hbox.set_margin_top(8);
+            hbox.set_margin_bottom(8);
+
+            let name_label = gtk::Label::new(Some(&rule.name));
+            name_label.set_halign(gtk::Align::Start);
+            name_label.set_hexpand(true);
+            name_label.set_xalign(0.0);
+            hbox.append(&name_label);
+
+            let smart_label = if rule.is_smart {
+                gtk::Label::new(Some("Smart"))
+            } else {
+                gtk::Label::new(Some("Custom"))
+            };
+            smart_label.add_css_class("dim-label");
+            hbox.append(&smart_label);
+
+            // Rule summary
+            let summary = summarize_rule(rule);
+            let summary_label = gtk::Label::new(Some(&summary));
+            summary_label.add_css_class("dim-label");
+            summary_label.add_css_class("monospace");
+            summary_label.set_width_chars(20);
+            summary_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            hbox.append(&summary_label);
+
+            row.set_child(Some(&hbox));
+            list_box.append(&row);
+        }
+
+        group.add(list_box.as_ref());
+        content.append(&group);
+
+        scroll.set_child(Some(&content));
+        scroll
+    }
+
     fn build_file_associations_page(config: &AppConfig, state: AppState) -> gtk::ScrolledWindow {
         let scroll = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
@@ -723,6 +798,53 @@ impl SettingsDialog {
         frame.set_child(Some(&vbox));
         frame
     }
+}
+
+fn dirs_config_path() -> std::path::PathBuf {
+    if let Some(config_dir) = dirs_config_dir() {
+        config_dir.join("raven")
+    } else {
+        std::path::PathBuf::from(".")
+    }
+}
+
+fn dirs_config_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))
+        })
+}
+
+fn summarize_rule(rule: &raven_ai::tags::TagRule) -> String {
+    use raven_ai::tags::TagMatchRule;
+    rule.rules
+        .iter()
+        .map(|r| match r {
+            TagMatchRule::Extension { exts } => {
+                let first_few: Vec<&str> = exts.iter().take(3).map(|s| s.as_str()).collect();
+                format!("ext: {}", first_few.join(", "))
+            }
+            TagMatchRule::NamePattern { pattern } => format!("name: {}", pattern),
+            TagMatchRule::MimePrefix { prefix } => format!("mime: {}", prefix),
+            TagMatchRule::SizeRange { min, max } => {
+                match (min, max) {
+                    (Some(min), None) => format!(">{}B", min),
+                    (None, Some(max)) => format!("<{}B", max),
+                    (Some(min), Some(max)) => format!("{}-{}B", min, max),
+                    (None, None) => "any size".to_string(),
+                }
+            }
+            TagMatchRule::ModifiedRange { after_days, before_days } => {
+                match (after_days, before_days) {
+                    (Some(d), None) => format!("<{}d old", d),
+                    (None, Some(d)) => format!(">{}d old", d),
+                    _ => "any date".to_string(),
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Format an action name for display (snake_case -> Title Case).
