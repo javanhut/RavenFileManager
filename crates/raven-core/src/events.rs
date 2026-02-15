@@ -163,6 +163,12 @@ pub enum AppEvent {
         suggestions: Vec<OrganizeSuggestion>,
     },
 
+    // Filter
+    FilterApplied {
+        filter: crate::filter::FilterSpec,
+        pane_id: u32,
+    },
+
     // Directory size (async calculation for listing)
     DirSizeCalculated {
         pane_id: u32,

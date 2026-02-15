@@ -507,11 +507,7 @@ fn main() -> glib::ExitCode {
                                     let parsed = nl_search::parse_nl_query(&query);
                                     let searcher = RecursiveSearcher::new();
                                     let local_path = path.as_local_path().cloned().unwrap_or_default();
-                                    let search_query = if parsed.filename_pattern.is_empty() {
-                                        "*".to_string()
-                                    } else {
-                                        parsed.filename_pattern.clone()
-                                    };
+                                    let search_query = parsed.filename_pattern.clone();
                                     let config = RecursiveSearchConfig {
                                         root: local_path,
                                         query: search_query,
@@ -660,12 +656,8 @@ fn main() -> glib::ExitCode {
                     }
 
                     // --- Filter ---
-                    AppCommand::SetFilter { filter, pane_id: _ } => {
-                        let _ = event_tx.send(AppEvent::Notification {
-                            title: "Filter applied".to_string(),
-                            message: format!("Filter: {}", filter.query),
-                            level: raven_core::events::NotificationLevel::Info,
-                        });
+                    AppCommand::SetFilter { filter, pane_id } => {
+                        let _ = event_tx.send(AppEvent::FilterApplied { filter, pane_id });
                     }
 
                     // --- Sort ---
@@ -1066,12 +1058,10 @@ fn main() -> glib::ExitCode {
                         });
                     }
 
-                    AppCommand::FilterByTag { tag, pane_id } => {
-                        let _ = event_tx.send(AppEvent::Notification {
-                            title: "Tag filter".to_string(),
-                            message: format!("Filtering by tag: {}", tag),
-                            level: raven_core::events::NotificationLevel::Info,
-                        });
+                    AppCommand::FilterByTag { tag, pane_id: _ } => {
+                        tracing::info!("Tag filter requested: {}", tag);
+                        // Tag filtering is handled UI-side via FilterApplied
+                        // since entries are stored in AppState on the UI thread
                     }
 
                     AppCommand::AnalyzeOrganization { path } => {
