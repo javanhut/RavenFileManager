@@ -1,6 +1,7 @@
 pub mod ai_types;
 pub mod automation_types;
 pub mod commands;
+pub mod dir_size_cache;
 pub mod config;
 pub mod entry;
 pub mod error;

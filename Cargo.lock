@@ -3494,6 +3494,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "dashmap",
  "serde",
  "thiserror 2.0.18",
  "toml 0.8.23",
@@ -3522,6 +3523,7 @@ dependencies = [
  "glib",
  "gtk4",
  "libadwaita",
+ "notify",
  "raven-ai",
  "raven-automation",
  "raven-core",

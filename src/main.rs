@@ -1,5 +1,9 @@
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
+use notify::{RecursiveMode, Watcher};
 use raven_ai::duplicates::{DuplicateScanConfig, DuplicateScanner};
 use raven_ai::nl_search;
 use raven_ai::organize::{OrganizationAnalyzer, OrganizeConfig};
@@ -9,6 +13,7 @@ use raven_automation::engine::AutomationEngine;
 use raven_core::commands::AppCommand;
 use raven_core::commands::SearchMode;
 use raven_core::config::AppConfig;
+use raven_core::dir_size_cache::DirSizeCache;
 use raven_core::entry::FileEntry;
 use raven_core::events::AppEvent;
 use raven_core::operations::{Operation, OperationId, OperationKind};
@@ -31,6 +36,12 @@ use raven_system::process_lock::ProcessLockDetector;
 use raven_system::systemd::SystemdInspector;
 use raven_ui::app::RavenApplication;
 use raven_vfs::router::VfsRouter;
+
+/// Cache entries older than this are revalidated in the background.
+const CACHE_TTL: Duration = Duration::from_secs(30);
+
+/// Debounce window for filesystem watcher events.
+const WATCHER_DEBOUNCE: Duration = Duration::from_millis(200);
 
 fn main() -> glib::ExitCode {
     tracing_subscriber::fmt()
@@ -67,6 +78,96 @@ fn main() -> glib::ExitCode {
             );
             let preview_router = Arc::new(PreviewRouter::new());
             let next_op_id = Arc::new(std::sync::atomic::AtomicU64::new(1));
+
+            // --- Directory size cache ---
+            let dir_size_cache = Arc::new(DirSizeCache::new());
+            let current_pane_id = Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+            // --- Filesystem watcher ---
+            let (fs_event_tx, mut fs_event_rx) =
+                tokio::sync::mpsc::unbounded_channel::<notify::Event>();
+            let watched_path: Arc<std::sync::Mutex<Option<PathBuf>>> =
+                Arc::new(std::sync::Mutex::new(None));
+            let fs_watcher: Arc<std::sync::Mutex<Option<notify::RecommendedWatcher>>> = {
+                let tx = fs_event_tx;
+                match notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+                    if let Ok(event) = res {
+                        let _ = tx.send(event);
+                    }
+                }) {
+                    Ok(w) => Arc::new(std::sync::Mutex::new(Some(w))),
+                    Err(e) => {
+                        tracing::warn!("Failed to create filesystem watcher: {}", e);
+                        Arc::new(std::sync::Mutex::new(None))
+                    }
+                }
+            };
+
+            // Spawn watcher debounce task
+            {
+                let cache = dir_size_cache.clone();
+                let event_tx = event_tx.clone();
+                let pane_id_ref = current_pane_id.clone();
+                let watched_path = watched_path.clone();
+                tokio::spawn(async move {
+                    loop {
+                        // Wait for the first event
+                        let first = match fs_event_rx.recv().await {
+                            Some(ev) => ev,
+                            None => break,
+                        };
+
+                        // Collect affected paths
+                        let mut affected_dirs: HashSet<PathBuf> = HashSet::new();
+                        for p in &first.paths {
+                            if let Some(parent) = p.parent() {
+                                affected_dirs.insert(parent.to_path_buf());
+                            }
+                        }
+
+                        // Debounce: collect events for WATCHER_DEBOUNCE duration
+                        let deadline =
+                            tokio::time::Instant::now() + WATCHER_DEBOUNCE;
+                        loop {
+                            match tokio::time::timeout_at(deadline, fs_event_rx.recv()).await {
+                                Ok(Some(ev)) => {
+                                    for p in &ev.paths {
+                                        if let Some(parent) = p.parent() {
+                                            affected_dirs.insert(parent.to_path_buf());
+                                        }
+                                    }
+                                }
+                                _ => break,
+                            }
+                        }
+
+                        // Process: invalidate and recalculate affected directories
+                        let pane_id =
+                            pane_id_ref.load(std::sync::atomic::Ordering::Relaxed);
+                        let current_watched = watched_path.lock().unwrap().clone();
+
+                        for dir_path in affected_dirs {
+                            // Only process if the affected dir is the watched dir
+                            // or a direct child of it (a subdirectory we display)
+                            let is_relevant = current_watched.as_ref().map_or(false, |w| {
+                                dir_path == *w || dir_path.parent() == Some(w.as_path())
+                            });
+                            if !is_relevant {
+                                continue;
+                            }
+
+                            cache.invalidate(&dir_path);
+                            let size = calculate_dir_size(&dir_path).await;
+                            cache.set(&dir_path, size);
+                            let _ = event_tx.send(AppEvent::DirSizeCalculated {
+                                pane_id,
+                                path: RavenPath::Local(dir_path),
+                                size,
+                            });
+                        }
+                    }
+                });
+            }
 
             // --- Automation engine ---
             let mut automation_engine = AutomationEngine::new(event_tx.clone());
@@ -158,17 +259,44 @@ fn main() -> glib::ExitCode {
                 let disk_usage_cancel = disk_usage_cancel.clone();
                 let tag_engine = tag_engine.clone();
                 let duplicate_scan_cancel = duplicate_scan_cancel.clone();
+                let dir_size_cache = dir_size_cache.clone();
+                let current_pane_id = current_pane_id.clone();
+                let fs_watcher = fs_watcher.clone();
+                let watched_path = watched_path.clone();
 
                 match command {
-                    // --- Navigation ---
+                    // --- Navigation (cache-first) ---
                     AppCommand::Navigate { path, pane_id } => {
+                        // Track the active pane for operation-triggered cache updates
+                        current_pane_id.store(pane_id, std::sync::atomic::Ordering::Relaxed);
+
+                        // Update filesystem watcher to the new directory
+                        if let Some(local) = path.as_local_path() {
+                            let new_path = local.clone();
+                            let mut wp = watched_path.lock().unwrap();
+                            if let Ok(mut watcher_guard) = fs_watcher.lock() {
+                                if let Some(ref mut watcher) = *watcher_guard {
+                                    // Unwatch old path
+                                    if let Some(ref old) = *wp {
+                                        let _ = watcher.unwatch(old);
+                                    }
+                                    // Watch new path
+                                    if let Err(e) = watcher.watch(&new_path, RecursiveMode::NonRecursive) {
+                                        tracing::debug!("Watcher failed for {}: {}", new_path.display(), e);
+                                    }
+                                }
+                            }
+                            *wp = Some(new_path);
+                        }
+
+                        let cache = dir_size_cache.clone();
                         tokio::spawn(async move {
                             tracing::info!("Navigating to: {}", path);
                             match vfs.list_dir(&path).await {
                                 Ok(mut entries) => {
                                     sort_entries(&mut entries, &SortSpec::default());
 
-                                    // Collect directory paths for async size calculation
+                                    // Collect directory paths for size calculation
                                     let dir_paths: Vec<RavenPath> = entries
                                         .iter()
                                         .filter(|e| e.is_dir())
@@ -183,18 +311,48 @@ fn main() -> glib::ExitCode {
                                     dbus_service.handle_event(&event).await;
                                     let _ = event_tx.send(event);
 
-                                    // Spawn async size calculations for each subdirectory
+                                    // Phase 1 + 2: cache-first with background validation
                                     for dir_path in dir_paths {
                                         if let Some(local) = dir_path.as_local_path().cloned() {
+                                            let cache = cache.clone();
                                             let event_tx = event_tx.clone();
-                                            tokio::spawn(async move {
-                                                let size = calculate_dir_size(&local).await;
+
+                                            // Phase 1: serve cached value instantly
+                                            let cached = cache.get(&local);
+                                            if let Some(ref entry) = cached {
                                                 let _ = event_tx.send(AppEvent::DirSizeCalculated {
                                                     pane_id,
-                                                    path: dir_path,
-                                                    size,
+                                                    path: dir_path.clone(),
+                                                    size: entry.size,
                                                 });
-                                            });
+                                            }
+
+                                            // Phase 2: background validation for uncached or stale entries
+                                            let needs_revalidation = match &cached {
+                                                None => true,
+                                                Some(entry) => entry.computed_at.elapsed() > CACHE_TTL,
+                                            };
+
+                                            if needs_revalidation {
+                                                tokio::spawn(async move {
+                                                    let generation = cache.invalidate(&local);
+                                                    let size = calculate_dir_size(&local).await;
+
+                                                    if cache.insert_if_current(&local, size, generation) {
+                                                        // Only send UI update if size differs from cached
+                                                        let should_notify = cached
+                                                            .map(|e| e.size != size)
+                                                            .unwrap_or(true);
+                                                        if should_notify {
+                                                            let _ = event_tx.send(AppEvent::DirSizeCalculated {
+                                                                pane_id,
+                                                                path: dir_path,
+                                                                size,
+                                                            });
+                                                        }
+                                                    }
+                                                });
+                                            }
                                         }
                                     }
                                 }
@@ -209,7 +367,7 @@ fn main() -> glib::ExitCode {
                         });
                     }
 
-                    // --- File Operations ---
+                    // --- File Operations (with cache invalidation) ---
                     AppCommand::CopyFiles {
                         sources,
                         destination,
@@ -233,10 +391,23 @@ fn main() -> glib::ExitCode {
                             description: desc,
                         });
 
+                        let cache = dir_size_cache.clone();
+                        let pane_id = current_pane_id.load(std::sync::atomic::Ordering::Relaxed);
                         tokio::spawn(async move {
                             let reporter = make_progress_reporter(op_id, event_tx.clone());
                             match executor.execute(&op, vfs.as_ref(), Some(reporter)).await {
                                 Ok(()) => {
+                                    // Invalidate destination directory and recalculate
+                                    if let Some(dest_local) = destination.as_local_path() {
+                                        cache.invalidate(dest_local);
+                                        let size = calculate_dir_size(dest_local).await;
+                                        cache.set(dest_local, size);
+                                        let _ = event_tx.send(AppEvent::DirSizeCalculated {
+                                            pane_id,
+                                            path: destination,
+                                            size,
+                                        });
+                                    }
                                     let event = AppEvent::OperationCompleted { id: op_id };
                                     dbus_service.handle_event(&event).await;
                                     let _ = event_tx.send(event);
@@ -274,10 +445,78 @@ fn main() -> glib::ExitCode {
                             description: desc,
                         });
 
+                        let cache = dir_size_cache.clone();
+                        let pane_id = current_pane_id.load(std::sync::atomic::Ordering::Relaxed);
                         tokio::spawn(async move {
+                            // Capture source sizes before the move for delta calculation
+                            let mut source_size_total: i64 = 0;
+                            let mut source_parents: HashSet<PathBuf> = HashSet::new();
+                            for src in &sources {
+                                if let Some(local) = src.as_local_path() {
+                                    if let Ok(meta) = tokio::fs::metadata(local).await {
+                                        if meta.is_dir() {
+                                            let size = cache.get(local)
+                                                .map(|e| e.size)
+                                                .unwrap_or_else(|| {
+                                                    // Will be recalculated; use 0 as fallback
+                                                    0
+                                                });
+                                            source_size_total += size as i64;
+                                        } else {
+                                            source_size_total += meta.len() as i64;
+                                        }
+                                    }
+                                    if let Some(parent) = local.parent() {
+                                        source_parents.insert(parent.to_path_buf());
+                                    }
+                                }
+                            }
+
                             let reporter = make_progress_reporter(op_id, event_tx.clone());
                             match executor.execute(&op, vfs.as_ref(), Some(reporter)).await {
                                 Ok(()) => {
+                                    // Invalidate source parents
+                                    for parent in &source_parents {
+                                        if source_size_total > 0 {
+                                            if let Some(new_size) = cache.apply_delta(parent, -source_size_total) {
+                                                let _ = event_tx.send(AppEvent::DirSizeCalculated {
+                                                    pane_id,
+                                                    path: RavenPath::Local(parent.clone()),
+                                                    size: new_size,
+                                                });
+                                            } else {
+                                                // Not cached, invalidate and recalculate
+                                                cache.invalidate(parent);
+                                                let size = calculate_dir_size(parent).await;
+                                                cache.set(parent, size);
+                                                let _ = event_tx.send(AppEvent::DirSizeCalculated {
+                                                    pane_id,
+                                                    path: RavenPath::Local(parent.clone()),
+                                                    size,
+                                                });
+                                            }
+                                        }
+                                    }
+
+                                    // Evict moved directories from cache
+                                    for src in &sources {
+                                        if let Some(local) = src.as_local_path() {
+                                            cache.evict_tree(local);
+                                        }
+                                    }
+
+                                    // Invalidate destination and recalculate
+                                    if let Some(dest_local) = destination.as_local_path() {
+                                        cache.invalidate(dest_local);
+                                        let size = calculate_dir_size(dest_local).await;
+                                        cache.set(dest_local, size);
+                                        let _ = event_tx.send(AppEvent::DirSizeCalculated {
+                                            pane_id,
+                                            path: destination,
+                                            size,
+                                        });
+                                    }
+
                                     let event = AppEvent::OperationCompleted { id: op_id };
                                     dbus_service.handle_event(&event).await;
                                     let _ = event_tx.send(event);
@@ -303,9 +542,76 @@ fn main() -> glib::ExitCode {
                             description: desc,
                         });
 
+                        let cache = dir_size_cache.clone();
+                        let pane_id = current_pane_id.load(std::sync::atomic::Ordering::Relaxed);
                         tokio::spawn(async move {
+                            // Stat files before deletion to capture sizes for delta updates
+                            let mut file_infos: Vec<(PathBuf, u64, bool)> = Vec::new();
+                            for p in &paths {
+                                if let Some(local) = p.as_local_path() {
+                                    if let Ok(meta) = tokio::fs::metadata(local).await {
+                                        if meta.is_dir() {
+                                            let size = cache.get(local)
+                                                .map(|e| e.size)
+                                                .unwrap_or_else(|| {
+                                                    // Can't async-calculate synchronously here,
+                                                    // we'll invalidate parent instead
+                                                    0
+                                                });
+                                            file_infos.push((local.clone(), size, true));
+                                        } else {
+                                            file_infos.push((local.clone(), meta.len(), false));
+                                        }
+                                    }
+                                }
+                            }
+
                             match executor.execute(&op, vfs.as_ref(), None).await {
                                 Ok(()) => {
+                                    // Apply cache deltas
+                                    let mut invalidated_parents: HashSet<PathBuf> = HashSet::new();
+                                    for (local_path, size, is_dir) in &file_infos {
+                                        if *is_dir {
+                                            cache.evict_tree(local_path);
+                                        }
+                                        if let Some(parent) = local_path.parent() {
+                                            if *size > 0 {
+                                                let delta = -(*size as i64);
+                                                if let Some(new_size) = cache.apply_delta(parent, delta) {
+                                                    let _ = event_tx.send(AppEvent::DirSizeCalculated {
+                                                        pane_id,
+                                                        path: RavenPath::Local(parent.to_path_buf()),
+                                                        size: new_size,
+                                                    });
+                                                    // Propagate to ancestors
+                                                    for (ancestor, a_size) in cache.propagate_delta_to_ancestors(parent, delta) {
+                                                        let _ = event_tx.send(AppEvent::DirSizeCalculated {
+                                                            pane_id,
+                                                            path: RavenPath::Local(ancestor),
+                                                            size: a_size,
+                                                        });
+                                                    }
+                                                } else {
+                                                    invalidated_parents.insert(parent.to_path_buf());
+                                                }
+                                            } else {
+                                                invalidated_parents.insert(parent.to_path_buf());
+                                            }
+                                        }
+                                    }
+
+                                    // For parents we couldn't apply deltas to, recalculate
+                                    for parent in invalidated_parents {
+                                        cache.invalidate(&parent);
+                                        let size = calculate_dir_size(&parent).await;
+                                        cache.set(&parent, size);
+                                        let _ = event_tx.send(AppEvent::DirSizeCalculated {
+                                            pane_id,
+                                            path: RavenPath::Local(parent),
+                                            size,
+                                        });
+                                    }
+
                                     let _ = event_tx.send(AppEvent::OperationCompleted { id: op_id });
                                 }
                                 Err(e) => {
@@ -329,9 +635,69 @@ fn main() -> glib::ExitCode {
                             description: desc,
                         });
 
+                        let cache = dir_size_cache.clone();
+                        let pane_id = current_pane_id.load(std::sync::atomic::Ordering::Relaxed);
                         tokio::spawn(async move {
+                            // Stat files before trashing to capture sizes for delta updates
+                            let mut file_infos: Vec<(PathBuf, u64, bool)> = Vec::new();
+                            for p in &paths {
+                                if let Some(local) = p.as_local_path() {
+                                    if let Ok(meta) = tokio::fs::metadata(local).await {
+                                        if meta.is_dir() {
+                                            let size = cache.get(local)
+                                                .map(|e| e.size)
+                                                .unwrap_or(0);
+                                            file_infos.push((local.clone(), size, true));
+                                        } else {
+                                            file_infos.push((local.clone(), meta.len(), false));
+                                        }
+                                    }
+                                }
+                            }
+
                             match executor.execute(&op, vfs.as_ref(), None).await {
                                 Ok(()) => {
+                                    let mut invalidated_parents: HashSet<PathBuf> = HashSet::new();
+                                    for (local_path, size, is_dir) in &file_infos {
+                                        if *is_dir {
+                                            cache.evict_tree(local_path);
+                                        }
+                                        if let Some(parent) = local_path.parent() {
+                                            if *size > 0 {
+                                                let delta = -(*size as i64);
+                                                if let Some(new_size) = cache.apply_delta(parent, delta) {
+                                                    let _ = event_tx.send(AppEvent::DirSizeCalculated {
+                                                        pane_id,
+                                                        path: RavenPath::Local(parent.to_path_buf()),
+                                                        size: new_size,
+                                                    });
+                                                    for (ancestor, a_size) in cache.propagate_delta_to_ancestors(parent, delta) {
+                                                        let _ = event_tx.send(AppEvent::DirSizeCalculated {
+                                                            pane_id,
+                                                            path: RavenPath::Local(ancestor),
+                                                            size: a_size,
+                                                        });
+                                                    }
+                                                } else {
+                                                    invalidated_parents.insert(parent.to_path_buf());
+                                                }
+                                            } else {
+                                                invalidated_parents.insert(parent.to_path_buf());
+                                            }
+                                        }
+                                    }
+
+                                    for parent in invalidated_parents {
+                                        cache.invalidate(&parent);
+                                        let size = calculate_dir_size(&parent).await;
+                                        cache.set(&parent, size);
+                                        let _ = event_tx.send(AppEvent::DirSizeCalculated {
+                                            pane_id,
+                                            path: RavenPath::Local(parent),
+                                            size,
+                                        });
+                                    }
+
                                     let _ = event_tx.send(AppEvent::OperationCompleted { id: op_id });
                                 }
                                 Err(e) => {
@@ -356,13 +722,23 @@ fn main() -> glib::ExitCode {
                         let op = Operation::new(
                             op_id,
                             OperationKind::Rename,
-                            vec![path],
-                            Some(dest),
+                            vec![path.clone()],
+                            Some(dest.clone()),
                         );
 
+                        let cache = dir_size_cache.clone();
                         tokio::spawn(async move {
                             match executor.execute(&op, vfs.as_ref(), None).await {
                                 Ok(()) => {
+                                    // Update cache key: remove old, insert new with same size
+                                    if let Some(old_local) = path.as_local_path() {
+                                        if let Some(entry) = cache.get(old_local) {
+                                            if let Some(new_local) = dest.as_local_path() {
+                                                cache.set(new_local, entry.size);
+                                            }
+                                            cache.evict_tree(old_local);
+                                        }
+                                    }
                                     let _ = event_tx.send(AppEvent::OperationCompleted { id: op_id });
                                 }
                                 Err(e) => {

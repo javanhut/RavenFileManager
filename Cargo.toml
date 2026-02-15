@@ -73,6 +73,9 @@ image = "0.25"
 # Utilities
 open = "5"
 
+# Concurrency
+dashmap = "6"
+
 # Hashing
 blake3 = "1"
 
@@ -110,3 +113,4 @@ libadwaita = { workspace = true }
 glib = { workspace = true }
 gio = { workspace = true }
 chrono = { workspace = true }
+notify = { workspace = true }
