@@ -8,12 +8,15 @@ use raven_core::config::Bookmark;
 use raven_core::path::RavenPath;
 
 use crate::state::AppState;
+use crate::widgets::file_list::format_size;
 
 /// Sidebar with bookmarks, mounted volumes, and tags.
 pub struct Sidebar {
     pub widget: gtk::Box,
     bookmarks_list: gtk::ListBox,
     tags_list: gtk::ListBox,
+    volume_list: gtk::ListBox,
+    volume_monitor: gio::VolumeMonitor,
     command_tx: tokio::sync::mpsc::UnboundedSender<AppCommand>,
     pane_id: u32,
     state: AppState,
@@ -52,6 +55,77 @@ impl Sidebar {
             bookmarks_list.append(&row);
         }
 
+        // --- Drop target on bookmarks_list: drag folders to pin as bookmarks ---
+        {
+            let pin_drop_target = gtk::DropTarget::new(
+                gtk::glib::types::Type::STRING,
+                gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE,
+            );
+
+            let bl_for_enter = bookmarks_list.clone();
+            let bl_for_leave = bookmarks_list.clone();
+            pin_drop_target.connect_enter(move |_target, _x, _y| {
+                bl_for_enter.add_css_class("drop-highlight");
+                gtk::gdk::DragAction::COPY
+            });
+            pin_drop_target.connect_leave(move |_target| {
+                bl_for_leave.remove_css_class("drop-highlight");
+            });
+
+            let state_for_pin = state.clone();
+            let bl_for_drop = bookmarks_list.clone();
+            let cmd_for_pin = command_tx.clone();
+            pin_drop_target.connect_drop(move |_target, value, _x, _y| {
+                if let Ok(uri_list) = value.get::<String>() {
+                    let paths: Vec<PathBuf> = uri_list
+                        .lines()
+                        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                        .filter_map(|line| {
+                            let line = line.trim().trim_end_matches('\r');
+                            line.strip_prefix("file://").map(PathBuf::from)
+                        })
+                        .collect();
+
+                    let mut pinned_any = false;
+                    for p in paths {
+                        if p.is_dir() {
+                            let name = p
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| p.to_string_lossy().to_string());
+                            let bookmark = Bookmark {
+                                name,
+                                path: p.to_string_lossy().to_string(),
+                                icon: Some("folder-symbolic".to_string()),
+                            };
+                            let is_dup = {
+                                let s = state_for_pin.borrow();
+                                s.config.bookmarks.iter().any(|b| b.path == bookmark.path)
+                            };
+                            if !is_dup {
+                                {
+                                    let mut s = state_for_pin.borrow_mut();
+                                    s.config.bookmarks.push(bookmark.clone());
+                                    let _ = s.config.save();
+                                }
+                                let row = Self::create_bookmark_row(
+                                    &bookmark,
+                                    &cmd_for_pin,
+                                    pane_id,
+                                    &state_for_pin,
+                                );
+                                bl_for_drop.append(&row);
+                                pinned_any = true;
+                            }
+                        }
+                    }
+                    return pinned_any;
+                }
+                false
+            });
+            bookmarks_list.add_controller(pin_drop_target);
+        }
+
         widget.append(&bookmarks_list);
 
         // Separator
@@ -72,27 +146,10 @@ impl Sidebar {
         volume_list.set_selection_mode(gtk::SelectionMode::Single);
         volume_list.add_css_class("navigation-sidebar");
 
-        // Add filesystem root
-        let root_row = Self::make_nav_row("Computer", "computer-symbolic", "/", &command_tx, pane_id);
-        volume_list.append(&root_row);
-
-        // Try to detect mounted volumes via gio
         let volume_monitor = gio::VolumeMonitor::get();
-        for mount in volume_monitor.mounts() {
-            let name = mount.name().to_string();
-            let root = mount.root();
-            if let Some(path) = root.path() {
-                let path_str = path.to_string_lossy().to_string();
-                let row = Self::make_nav_row(
-                    &name,
-                    "drive-harddisk-symbolic",
-                    &path_str,
-                    &command_tx,
-                    pane_id,
-                );
-                volume_list.append(&row);
-            }
-        }
+
+        // Populate volume list
+        Self::populate_volume_list(&volume_list, &volume_monitor, &command_tx, pane_id);
 
         widget.append(&volume_list);
 
@@ -119,10 +176,301 @@ impl Sidebar {
             widget,
             bookmarks_list,
             tags_list,
+            volume_list,
+            volume_monitor,
             command_tx,
             pane_id,
             state,
         }
+    }
+
+    /// Connect VolumeMonitor signals so the Devices section updates dynamically.
+    pub fn connect_volume_signals(&self) {
+        let vl = self.volume_list.clone();
+        let vm = self.volume_monitor.clone();
+        let cmd_tx = self.command_tx.clone();
+        let pane_id = self.pane_id;
+
+        let refresh = {
+            let vl = vl.clone();
+            let vm = vm.clone();
+            let cmd_tx = cmd_tx.clone();
+            move || {
+                Self::populate_volume_list(&vl, &vm, &cmd_tx, pane_id);
+            }
+        };
+
+        {
+            let refresh = refresh.clone();
+            self.volume_monitor.connect_mount_added(move |_, _| {
+                refresh();
+            });
+        }
+        {
+            let refresh = refresh.clone();
+            self.volume_monitor.connect_mount_removed(move |_, _| {
+                refresh();
+            });
+        }
+        {
+            let refresh = refresh.clone();
+            self.volume_monitor.connect_volume_added(move |_, _| {
+                refresh();
+            });
+        }
+        {
+            let refresh = refresh.clone();
+            self.volume_monitor.connect_volume_removed(move |_, _| {
+                refresh();
+            });
+        }
+    }
+
+    /// Populate (or refresh) the volume list with mounted and unmounted volumes.
+    fn populate_volume_list(
+        volume_list: &gtk::ListBox,
+        volume_monitor: &gio::VolumeMonitor,
+        command_tx: &tokio::sync::mpsc::UnboundedSender<AppCommand>,
+        pane_id: u32,
+    ) {
+        // Clear existing rows
+        while let Some(child) = volume_list.first_child() {
+            volume_list.remove(&child);
+        }
+
+        // Add filesystem root with disk space
+        let root_row = Self::create_device_row("Computer", "computer-symbolic", "/", command_tx, pane_id);
+        volume_list.append(&root_row);
+
+        // Mounted volumes
+        for mount in volume_monitor.mounts() {
+            let name = mount.name().to_string();
+            let root = mount.root();
+            if let Some(path) = root.path() {
+                let path_str = path.to_string_lossy().to_string();
+                let icon_name = mount
+                    .symbolic_icon()
+                    .downcast::<gio::ThemedIcon>()
+                    .ok()
+                    .and_then(|themed| {
+                        themed.names().into_iter()
+                            .find(|n| n.ends_with("-symbolic"))
+                            .map(|n| n.to_string())
+                    })
+                    .unwrap_or_else(|| "drive-harddisk-symbolic".to_string());
+                let row = Self::create_mounted_device_row(
+                    &name,
+                    &icon_name,
+                    &path_str,
+                    command_tx,
+                    pane_id,
+                    &mount,
+                );
+                volume_list.append(&row);
+            }
+        }
+
+        // Unmounted volumes
+        for volume in volume_monitor.volumes() {
+            if volume.get_mount().is_some() {
+                continue; // Already shown as mounted
+            }
+            let name = volume.name().to_string();
+            let row = Self::create_unmounted_volume_row(&name, &volume);
+            volume_list.append(&row);
+        }
+    }
+
+    /// Create a device row with disk space info (LevelBar + free/total label).
+    fn create_device_row(
+        name: &str,
+        icon_name: &str,
+        path_str: &str,
+        command_tx: &tokio::sync::mpsc::UnboundedSender<AppCommand>,
+        pane_id: u32,
+    ) -> gtk::ListBoxRow {
+        let vbox = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        vbox.set_margin_start(8);
+        vbox.set_margin_end(8);
+        vbox.set_margin_top(4);
+        vbox.set_margin_bottom(4);
+
+        let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let icon = gtk::Image::from_icon_name(icon_name);
+        icon.set_pixel_size(16);
+        hbox.append(&icon);
+
+        let lbl = gtk::Label::new(Some(name));
+        lbl.set_halign(gtk::Align::Start);
+        lbl.set_hexpand(true);
+        lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        hbox.append(&lbl);
+        vbox.append(&hbox);
+
+        // Disk space info
+        if let Some((free, total)) = get_fs_space(path_str) {
+            if total > 0 {
+                let used = total.saturating_sub(free);
+                let fraction = used as f64 / total as f64;
+
+                let space_label = gtk::Label::new(Some(&format!(
+                    "{} free of {}",
+                    format_size(free),
+                    format_size(total)
+                )));
+                space_label.set_halign(gtk::Align::Start);
+                space_label.add_css_class("dim-label");
+                space_label.add_css_class("caption");
+                vbox.append(&space_label);
+
+                let level_bar = gtk::LevelBar::new();
+                level_bar.set_min_value(0.0);
+                level_bar.set_max_value(1.0);
+                level_bar.set_value(fraction);
+                level_bar.set_height_request(4);
+                level_bar.add_offset_value("low", 0.6);
+                level_bar.add_offset_value("high", 0.8);
+                level_bar.add_offset_value("full", 0.95);
+                vbox.append(&level_bar);
+            }
+        }
+
+        let row = gtk::ListBoxRow::new();
+        row.set_child(Some(&vbox));
+
+        let cmd_tx = command_tx.clone();
+        let target_path = path_str.to_string();
+        let gesture = gtk::GestureClick::new();
+        gesture.set_button(1);
+        gesture.connect_released(move |_, _, _, _| {
+            let _ = cmd_tx.send(AppCommand::Navigate {
+                path: RavenPath::local(PathBuf::from(&target_path)),
+                pane_id,
+            });
+        });
+        row.add_controller(gesture);
+
+        row
+    }
+
+    /// Create a mounted device row with disk space and unmount context menu.
+    fn create_mounted_device_row(
+        name: &str,
+        icon_name: &str,
+        path_str: &str,
+        command_tx: &tokio::sync::mpsc::UnboundedSender<AppCommand>,
+        pane_id: u32,
+        mount: &gio::Mount,
+    ) -> gtk::ListBoxRow {
+        let row = Self::create_device_row(name, icon_name, path_str, command_tx, pane_id);
+
+        // Right-click: unmount context menu
+        let menu = gio::Menu::new();
+        menu.append(Some("Unmount"), Some("device.unmount"));
+
+        let popover = gtk::PopoverMenu::from_model(Some(&menu));
+        popover.set_has_arrow(false);
+        popover.set_parent(&row);
+
+        let action_group = gio::SimpleActionGroup::new();
+        let action = gio::SimpleAction::new("unmount", None);
+
+        let mount_for_unmount = mount.clone();
+        action.connect_activate(move |_, _| {
+            let mount_op = gio::MountOperation::new();
+            mount_for_unmount.unmount_with_operation(
+                gio::MountUnmountFlags::NONE,
+                Some(&mount_op),
+                gio::Cancellable::NONE,
+                |result| {
+                    match result {
+                        Ok(()) => tracing::info!("Volume unmounted"),
+                        Err(e) => tracing::error!("Unmount failed: {}", e),
+                    }
+                },
+            );
+        });
+        action_group.add_action(&action);
+        row.insert_action_group("device", Some(&action_group));
+
+        let right_click = gtk::GestureClick::new();
+        right_click.set_button(3);
+        right_click.connect_released(move |_, _, x, y| {
+            let rect = gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1);
+            popover.set_pointing_to(Some(&rect));
+            popover.popup();
+        });
+        row.add_controller(right_click);
+
+        row
+    }
+
+    /// Create a dimmed row for unmounted volumes with click-to-mount.
+    fn create_unmounted_volume_row(name: &str, volume: &gio::Volume) -> gtk::ListBoxRow {
+        let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        hbox.set_margin_start(8);
+        hbox.set_margin_end(8);
+        hbox.set_margin_top(4);
+        hbox.set_margin_bottom(4);
+
+        let icon = gtk::Image::from_icon_name("drive-harddisk-symbolic");
+        icon.set_pixel_size(16);
+        icon.set_opacity(0.5);
+        hbox.append(&icon);
+
+        let lbl = gtk::Label::new(Some(&format!("{} (unmounted)", name)));
+        lbl.set_halign(gtk::Align::Start);
+        lbl.set_hexpand(true);
+        lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        lbl.set_opacity(0.5);
+        hbox.append(&lbl);
+
+        let mount_btn = gtk::Button::from_icon_name("media-mount-symbolic");
+        mount_btn.add_css_class("flat");
+        mount_btn.add_css_class("circular");
+        mount_btn.set_tooltip_text(Some("Mount"));
+
+        let volume_for_btn = volume.clone();
+        mount_btn.connect_clicked(move |_| {
+            let mount_op = gio::MountOperation::new();
+            volume_for_btn.mount(
+                gio::MountMountFlags::NONE,
+                Some(&mount_op),
+                gio::Cancellable::NONE,
+                |result| {
+                    match result {
+                        Ok(()) => tracing::info!("Volume mounted"),
+                        Err(e) => tracing::error!("Mount failed: {}", e),
+                    }
+                },
+            );
+        });
+        hbox.append(&mount_btn);
+
+        let row = gtk::ListBoxRow::new();
+        row.set_child(Some(&hbox));
+
+        // Click on the row also triggers mount
+        let volume_for_click = volume.clone();
+        let gesture = gtk::GestureClick::new();
+        gesture.set_button(1);
+        gesture.connect_released(move |_, _, _, _| {
+            let mount_op = gio::MountOperation::new();
+            volume_for_click.mount(
+                gio::MountMountFlags::NONE,
+                Some(&mount_op),
+                gio::Cancellable::NONE,
+                |result| {
+                    match result {
+                        Ok(()) => tracing::info!("Volume mounted"),
+                        Err(e) => tracing::error!("Mount failed: {}", e),
+                    }
+                },
+            );
+        });
+        row.add_controller(gesture);
+
+        row
     }
 
     /// Update the tags section with new counts.
@@ -341,44 +689,18 @@ impl Sidebar {
 
         popover
     }
+}
 
-    /// Simple navigation row (no remove option) for Devices section.
-    fn make_nav_row(
-        label: &str,
-        icon_name: &str,
-        path_str: &str,
-        command_tx: &tokio::sync::mpsc::UnboundedSender<AppCommand>,
-        pane_id: u32,
-    ) -> gtk::ListBoxRow {
-        let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        hbox.set_margin_start(8);
-        hbox.set_margin_end(8);
-        hbox.set_margin_top(4);
-        hbox.set_margin_bottom(4);
-
-        let icon = gtk::Image::from_icon_name(icon_name);
-        icon.set_pixel_size(16);
-        hbox.append(&icon);
-
-        let lbl = gtk::Label::new(Some(label));
-        lbl.set_halign(gtk::Align::Start);
-        lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        hbox.append(&lbl);
-
-        let row = gtk::ListBoxRow::new();
-        row.set_child(Some(&hbox));
-
-        let cmd_tx = command_tx.clone();
-        let target_path = path_str.to_string();
-        let gesture = gtk::GestureClick::new();
-        gesture.connect_released(move |_, _, _, _| {
-            let _ = cmd_tx.send(AppCommand::Navigate {
-                path: RavenPath::local(PathBuf::from(&target_path)),
-                pane_id,
-            });
-        });
-        row.add_controller(gesture);
-
-        row
+/// Get filesystem space info for a mount point: (free_bytes, total_bytes).
+fn get_fs_space(path: &str) -> Option<(u64, u64)> {
+    let c_path = std::ffi::CString::new(path).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+    if ret == 0 {
+        let total = stat.f_blocks as u64 * stat.f_frsize as u64;
+        let free = stat.f_bavail as u64 * stat.f_frsize as u64;
+        Some((free, total))
+    } else {
+        None
     }
 }

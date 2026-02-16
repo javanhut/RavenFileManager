@@ -7,6 +7,7 @@ use libadwaita as adw;
 use libadwaita::prelude::*;
 
 use raven_core::commands::AppCommand;
+use raven_core::config::ViewMode;
 use raven_core::events::AppEvent;
 use raven_core::path::RavenPath;
 
@@ -115,6 +116,39 @@ impl RavenWindow {
 
         header.pack_start(&nav_box);
 
+        // View mode toggle buttons
+        let view_mode_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        view_mode_box.add_css_class("linked");
+
+        let list_btn = gtk::ToggleButton::new();
+        list_btn.set_icon_name("view-list-symbolic");
+        list_btn.set_tooltip_text(Some("List view"));
+        view_mode_box.append(&list_btn);
+
+        let icons_btn = gtk::ToggleButton::new();
+        icons_btn.set_icon_name("view-grid-symbolic");
+        icons_btn.set_tooltip_text(Some("Icon view"));
+        icons_btn.set_group(Some(&list_btn));
+        view_mode_box.append(&icons_btn);
+
+        let previews_btn = gtk::ToggleButton::new();
+        previews_btn.set_icon_name("view-app-grid-symbolic");
+        previews_btn.set_tooltip_text(Some("Preview view"));
+        previews_btn.set_group(Some(&list_btn));
+        view_mode_box.append(&previews_btn);
+
+        // Set initial active button from state
+        {
+            let s = state.borrow();
+            match s.view_mode {
+                ViewMode::List => list_btn.set_active(true),
+                ViewMode::Icons => icons_btn.set_active(true),
+                ViewMode::Previews => previews_btn.set_active(true),
+            }
+        }
+
+        header.pack_start(&view_mode_box);
+
         // Settings button (hamburger menu)
         let settings_btn = gtk::Button::from_icon_name("open-menu-symbolic");
         settings_btn.set_tooltip_text(Some("Settings (Ctrl+,)"));
@@ -198,11 +232,11 @@ impl RavenWindow {
 
         content_box.append(&sidebar_scroll);
         content_box.append(&sidebar_separator);
-        content_box.append(&file_list.scrolled_window);
+        content_box.append(&file_list.widget);
 
         // --- Context menu ---
         let context_menu = Rc::new(FileContextMenu::new());
-        context_menu.popover.set_parent(&file_list.column_view);
+        context_menu.popover.set_parent(&file_list.widget);
 
         // Register file actions on the column_view
         let action_group = gio::SimpleActionGroup::new();
@@ -456,9 +490,19 @@ impl RavenWindow {
         file_list
             .column_view
             .insert_action_group("file", Some(&action_group));
+        file_list
+            .icon_grid_view
+            .insert_action_group("file", Some(&action_group));
+        file_list
+            .preview_grid_view
+            .insert_action_group("file", Some(&action_group));
 
-        // Right-click gesture for context menu
-        {
+        // Right-click gesture for context menu (on all three views)
+        for view_widget in [
+            file_list.column_view.upcast_ref::<gtk::Widget>(),
+            file_list.icon_grid_view.upcast_ref::<gtk::Widget>(),
+            file_list.preview_grid_view.upcast_ref::<gtk::Widget>(),
+        ] {
             let context_menu = context_menu.clone();
             let file_list_for_ctx = file_list.clone();
             let state = state.clone();
@@ -474,7 +518,7 @@ impl RavenWindow {
                 context_menu.popover.set_pointing_to(Some(&rect));
                 context_menu.popover.popup();
             });
-            file_list.column_view.add_controller(gesture);
+            view_widget.add_controller(gesture);
         }
 
         // Preview panel (initially hidden)
@@ -544,6 +588,47 @@ impl RavenWindow {
                 let entries = s.active_tab().active_pane().entries.clone();
                 drop(s);
                 file_list.set_entries(&entries, show_hidden);
+            });
+        }
+
+        // --- View mode toggle callbacks ---
+        {
+            let file_list = file_list.clone();
+            let state = state.clone();
+            list_btn.connect_toggled(move |btn| {
+                if btn.is_active() {
+                    file_list.set_view_mode(ViewMode::List);
+                    let mut s = state.borrow_mut();
+                    s.view_mode = ViewMode::List;
+                    s.config.appearance.view_mode = ViewMode::List;
+                    let _ = s.config.save();
+                }
+            });
+        }
+        {
+            let file_list = file_list.clone();
+            let state = state.clone();
+            icons_btn.connect_toggled(move |btn| {
+                if btn.is_active() {
+                    file_list.set_view_mode(ViewMode::Icons);
+                    let mut s = state.borrow_mut();
+                    s.view_mode = ViewMode::Icons;
+                    s.config.appearance.view_mode = ViewMode::Icons;
+                    let _ = s.config.save();
+                }
+            });
+        }
+        {
+            let file_list = file_list.clone();
+            let state = state.clone();
+            previews_btn.connect_toggled(move |btn| {
+                if btn.is_active() {
+                    file_list.set_view_mode(ViewMode::Previews);
+                    let mut s = state.borrow_mut();
+                    s.view_mode = ViewMode::Previews;
+                    s.config.appearance.view_mode = ViewMode::Previews;
+                    let _ = s.config.save();
+                }
             });
         }
 
@@ -763,6 +848,9 @@ impl RavenWindow {
             });
             window.add_controller(key_controller);
         }
+
+        // Connect volume monitor signals for dynamic device list updates
+        sidebar.connect_volume_signals();
 
         // Request container info on startup
         let _ = command_tx.send(AppCommand::GetContainerInfo);

@@ -79,6 +79,9 @@ dashmap = "6"
 # Hashing
 blake3 = "1"
 
+# System
+libc = "0.2"
+
 # Testing
 tempfile = "3"
 

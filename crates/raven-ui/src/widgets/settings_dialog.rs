@@ -6,7 +6,7 @@ use gtk::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 
-use raven_core::config::{AppConfig, FileAssociation, Keybinding, Theme};
+use raven_core::config::{AppConfig, FileAssociation, Keybinding, Theme, ViewMode};
 
 use crate::state::AppState;
 use crate::themes;
@@ -265,6 +265,32 @@ impl SettingsDialog {
             });
         }
         layout_group.add(&sidebar_row);
+
+        let view_mode_row = adw::ComboRow::new();
+        view_mode_row.set_title("Default view mode");
+        let view_mode_model = gtk::StringList::new(&["List", "Icons", "Previews"]);
+        view_mode_row.set_model(Some(&view_mode_model));
+        let current_view_idx = match config.appearance.view_mode {
+            ViewMode::List => 0,
+            ViewMode::Icons => 1,
+            ViewMode::Previews => 2,
+        };
+        view_mode_row.set_selected(current_view_idx);
+        {
+            let state = state.clone();
+            view_mode_row.connect_selected_notify(move |row| {
+                let mode = match row.selected() {
+                    1 => ViewMode::Icons,
+                    2 => ViewMode::Previews,
+                    _ => ViewMode::List,
+                };
+                let mut s = state.borrow_mut();
+                s.view_mode = mode;
+                s.config.appearance.view_mode = mode;
+                let _ = s.config.save();
+            });
+        }
+        layout_group.add(&view_mode_row);
 
         content.append(&layout_group);
 

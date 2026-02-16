@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use raven_core::config::AppConfig;
+use raven_core::config::{AppConfig, ViewMode};
 use raven_core::entry::FileEntry;
 use raven_core::filter::FilterSpec;
 use raven_core::path::RavenPath;
@@ -124,6 +124,7 @@ pub struct AppStateInner {
     pub show_preview: bool,
     pub preview_path: Option<RavenPath>,
     pub clipboard: Option<ClipboardOp>,
+    pub view_mode: ViewMode,
     next_tab_id: u32,
 }
 
@@ -140,6 +141,7 @@ impl AppStateInner {
 
         let initial_tab = TabState::new(0, initial_path);
 
+        let view_mode = config.appearance.view_mode;
         Self {
             config,
             tabs: vec![initial_tab],
@@ -148,6 +150,7 @@ impl AppStateInner {
             show_preview: false,
             preview_path: None,
             clipboard: None,
+            view_mode,
             next_tab_id: 1,
         }
     }

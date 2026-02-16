@@ -156,6 +156,19 @@ impl Theme {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ViewMode {
+    List,
+    Icons,
+    Previews,
+}
+
+impl Default for ViewMode {
+    fn default() -> Self {
+        Self::List
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppearanceConfig {
     pub icon_size: u32,
@@ -167,6 +180,8 @@ pub struct AppearanceConfig {
     pub preview_panel_width: i32,
     #[serde(default)]
     pub theme: Theme,
+    #[serde(default)]
+    pub view_mode: ViewMode,
 }
 
 impl Default for AppearanceConfig {
@@ -180,6 +195,7 @@ impl Default for AppearanceConfig {
             sidebar_width: 200,
             preview_panel_width: 300,
             theme: Theme::default(),
+            view_mode: ViewMode::default(),
         }
     }
 }

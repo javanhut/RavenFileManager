@@ -95,3 +95,23 @@
     border: 1px dashed @accent_color;
     border-radius: 6px;
 }
+
+/* Disk space level bar in sidebar */
+.navigation-sidebar levelbar trough {
+    min-height: 4px;
+    border-radius: 2px;
+}
+
+.caption {
+    font-size: 10px;
+}
+
+/* Grid view items (icon/preview mode) */
+gridview > child {
+    padding: 8px;
+    border-radius: 8px;
+}
+
+gridview > child:selected {
+    background-color: alpha(@accent_color, 0.15);
+}
