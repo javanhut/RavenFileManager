@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=Raven File Manager
 Comment=Fast, powerful, and extensible file manager
-Exec=raven %U
+Exec=ravenfilemanager %U
 Icon=com.ravenfilemanager.Raven
 Terminal=false
 Type=Application
