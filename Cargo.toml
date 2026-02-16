@@ -92,7 +92,7 @@ edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "raven"
+name = "ravenfilemanager"
 path = "src/main.rs"
 
 [dependencies]
