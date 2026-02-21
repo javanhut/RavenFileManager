@@ -1,5 +1,6 @@
-use gtk4 as gtk;
+use gtk::glib::variant::ToVariant;
 use gtk::prelude::*;
+use gtk4 as gtk;
 
 use raven_core::config::AppConfig;
 use raven_core::entry::FileEntry;
@@ -49,7 +50,10 @@ impl FileContextMenu {
         // AI section
         let ai_section = gio::Menu::new();
         ai_section.append(Some("Find Duplicates..."), Some("file.find_duplicates"));
-        ai_section.append(Some("Suggest Organization..."), Some("file.suggest_organization"));
+        ai_section.append(
+            Some("Suggest Organization..."),
+            Some("file.suggest_organization"),
+        );
         menu.append_section(None, &ai_section);
 
         // Destructive section
@@ -82,8 +86,12 @@ impl FileContextMenu {
         let matches = file_opener::get_matching_associations(config, extension);
 
         for (i, label) in &matches {
-            let action_name = format!("file.open-with-{}", i);
-            self.open_with_section.append(Some(label), Some(&action_name));
+            let item = gio::MenuItem::new(Some(label), None);
+            item.set_action_and_target_value(
+                Some("file.open-with"),
+                Some(&(i.to_owned() as i32).to_variant()),
+            );
+            self.open_with_section.append_item(&item);
         }
 
         if matches.is_empty() {
@@ -92,25 +100,31 @@ impl FileContextMenu {
         }
     }
 
+    pub fn clear_open_with(&self) {
+        self.open_with_section.remove_all();
+        self.open_with_section
+            .append(Some("(no file selected)"), None);
+    }
+
     /// Update the "Tag" submenu with available tags and current file's tags.
     pub fn update_tags(&self, all_tags: &[String], current_tags: &[String]) {
         self.tag_section.remove_all();
 
         if all_tags.is_empty() {
-            self.tag_section
-                .append(Some("(no tags defined)"), None);
+            self.tag_section.append(Some("(no tags defined)"), None);
             return;
         }
 
-        for (i, tag) in all_tags.iter().enumerate() {
+        for tag in all_tags {
             let is_tagged = current_tags.contains(tag);
             let label = if is_tagged {
                 format!("\u{2713} {}", tag)
             } else {
                 tag.clone()
             };
-            let action_name = format!("file.toggle-tag-{}", i);
-            self.tag_section.append(Some(&label), Some(&action_name));
+            let item = gio::MenuItem::new(Some(&label), None);
+            item.set_action_and_target_value(Some("file.toggle-tag"), Some(&tag.to_variant()));
+            self.tag_section.append_item(&item);
         }
     }
 }

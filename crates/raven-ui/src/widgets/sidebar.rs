@@ -128,6 +128,44 @@ impl Sidebar {
 
         widget.append(&bookmarks_list);
 
+        // Permanent Trash entry (always visible, not user-removable).
+        // SelectionMode::None prevents the row from staying highlighted when
+        // the user navigates to another folder in a different ListBox.
+        let trash_list = gtk::ListBox::new();
+        trash_list.set_selection_mode(gtk::SelectionMode::None);
+        trash_list.add_css_class("navigation-sidebar");
+
+        let trash_hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        trash_hbox.set_margin_start(8);
+        trash_hbox.set_margin_end(8);
+        trash_hbox.set_margin_top(4);
+        trash_hbox.set_margin_bottom(4);
+        let trash_icon = gtk::Image::from_icon_name("user-trash-symbolic");
+        trash_icon.set_pixel_size(16);
+        trash_hbox.append(&trash_icon);
+        let trash_lbl = gtk::Label::new(Some("Trash"));
+        trash_lbl.set_halign(gtk::Align::Start);
+        trash_hbox.append(&trash_lbl);
+        let trash_row = gtk::ListBoxRow::new();
+        trash_row.set_child(Some(&trash_hbox));
+
+        let trash_path = PathBuf::from(
+            std::env::var("HOME").unwrap_or_else(|_| "/root".to_string()),
+        )
+        .join(".local/share/Trash/files");
+        let cmd_tx_trash = command_tx.clone();
+        let trash_gesture = gtk::GestureClick::new();
+        trash_gesture.set_button(1);
+        trash_gesture.connect_released(move |_, _, _, _| {
+            let _ = cmd_tx_trash.send(AppCommand::Navigate {
+                path: RavenPath::local(trash_path.clone()),
+                pane_id,
+            });
+        });
+        trash_row.add_controller(trash_gesture);
+        trash_list.append(&trash_row);
+        widget.append(&trash_list);
+
         // Separator
         let sep = gtk::Separator::new(gtk::Orientation::Horizontal);
         sep.set_margin_top(12);

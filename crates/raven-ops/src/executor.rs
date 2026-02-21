@@ -150,13 +150,18 @@ impl OperationExecutor {
             })?;
             let dest_path = destination.join(file_name);
 
-            // Check for conflicts
-            let dest_path = self
-                .resolve_conflict(operation.id, source, &dest_path)
-                .await?;
-            let dest_path = match dest_path {
-                Some(p) => p,
-                None => continue, // Skipped
+            // When pasting into the same directory the file already lives in,
+            // always auto-rename (e.g. "file.txt" -> "file (1).txt").
+            // For cross-directory copies, use the normal conflict resolver.
+            let dest_path = if source == &dest_path {
+                self.conflict_resolver
+                    .generate_unique_name(&dest_path)
+                    .await?
+            } else {
+                match self.resolve_conflict(operation.id, source, &dest_path).await? {
+                    Some(p) => p,
+                    None => continue, // Skipped
+                }
             };
 
             // Use the copy engine for local paths, VFS for others

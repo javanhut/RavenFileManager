@@ -1,13 +1,15 @@
 use std::cell::RefCell;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gtk4 as gtk;
-use gtk::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 
 use raven_core::commands::AppCommand;
-use raven_core::config::ViewMode;
+use raven_core::config::{AppConfig, ViewMode};
+use raven_core::entry::FileEntry;
 use raven_core::events::AppEvent;
 use raven_core::path::RavenPath;
 
@@ -228,7 +230,11 @@ impl RavenWindow {
         sidebar_scroll.set_width_request(200);
 
         let sidebar_separator = gtk::Separator::new(gtk::Orientation::Vertical);
-        let file_list = Rc::new(FileListView::new(state.clone(), command_tx.clone(), pane_id));
+        let file_list = Rc::new(FileListView::new(
+            state.clone(),
+            command_tx.clone(),
+            pane_id,
+        ));
 
         content_box.append(&sidebar_scroll);
         content_box.append(&sidebar_separator);
@@ -237,6 +243,8 @@ impl RavenWindow {
         // --- Context menu ---
         let context_menu = Rc::new(FileContextMenu::new());
         context_menu.popover.set_parent(&file_list.widget);
+        let context_selected_tags: Rc<RefCell<HashSet<String>>> =
+            Rc::new(RefCell::new(HashSet::new()));
 
         // Register file actions on the column_view
         let action_group = gio::SimpleActionGroup::new();
@@ -248,7 +256,13 @@ impl RavenWindow {
             let cmd_tx = command_tx.clone();
             let action = gio::SimpleAction::new("open", None);
             action.connect_activate(move |_, _| {
-                if let Some(entry) = get_selected_entry(&file_list) {
+                let selected = get_selected_entries(&file_list);
+                if selected.is_empty() {
+                    return;
+                }
+
+                if selected.len() == 1 {
+                    let entry = &selected[0];
                     if entry.is_dir() {
                         {
                             let mut s = state.borrow_mut();
@@ -256,9 +270,20 @@ impl RavenWindow {
                                 pane.navigate_to(entry.path.clone());
                             }
                         }
-                        let _ = cmd_tx.send(AppCommand::Navigate { path: entry.path, pane_id });
+                        let _ = cmd_tx.send(AppCommand::Navigate {
+                            path: entry.path.clone(),
+                            pane_id,
+                        });
                     } else {
                         let config = state.borrow().config.clone();
+                        crate::file_opener::open_file(&entry.path, &config);
+                    }
+                    return;
+                }
+
+                let config = state.borrow().config.clone();
+                for entry in selected {
+                    if !entry.is_dir() {
                         crate::file_opener::open_file(&entry.path, &config);
                     }
                 }
@@ -272,9 +297,10 @@ impl RavenWindow {
             let state = state.clone();
             let action = gio::SimpleAction::new("copy", None);
             action.connect_activate(move |_, _| {
-                if let Some(entry) = get_selected_entry(&file_list) {
+                let paths = get_selected_paths(&file_list);
+                if !paths.is_empty() {
                     let mut s = state.borrow_mut();
-                    s.clipboard = Some(ClipboardOp::Copy(vec![entry.path]));
+                    s.clipboard = Some(ClipboardOp::Copy(paths));
                 }
             });
             action_group.add_action(&action);
@@ -286,9 +312,10 @@ impl RavenWindow {
             let state = state.clone();
             let action = gio::SimpleAction::new("cut", None);
             action.connect_activate(move |_, _| {
-                if let Some(entry) = get_selected_entry(&file_list) {
+                let paths = get_selected_paths(&file_list);
+                if !paths.is_empty() {
                     let mut s = state.borrow_mut();
-                    s.clipboard = Some(ClipboardOp::Cut(vec![entry.path]));
+                    s.clipboard = Some(ClipboardOp::Cut(paths));
                 }
             });
             action_group.add_action(&action);
@@ -331,34 +358,54 @@ impl RavenWindow {
             let window_ref = window.clone();
             let action = gio::SimpleAction::new("rename", None);
             action.connect_activate(move |_, _| {
-                if let Some(entry) = get_selected_entry(&file_list) {
+                if let Some(entry) = get_primary_selected_entry(&file_list) {
                     show_rename_dialog(&window_ref, &entry, &cmd_tx);
                 }
             });
             action_group.add_action(&action);
         }
 
-        // file.trash
+        // file.trash — move to Trash, or permanently delete if already in Trash.
         {
             let file_list = file_list.clone();
             let cmd_tx = command_tx.clone();
+            let state = state.clone();
             let action = gio::SimpleAction::new("trash", None);
             action.connect_activate(move |_, _| {
-                if let Some(entry) = get_selected_entry(&file_list) {
-                    let _ = cmd_tx.send(AppCommand::TrashFiles { paths: vec![entry.path] });
+                let paths = get_selected_paths(&file_list);
+                if !paths.is_empty() {
+                    let in_trash = {
+                        let s = state.borrow();
+                        is_in_trash(&s.active_tab().active_pane().current_path)
+                    };
+                    if in_trash {
+                        let _ = cmd_tx.send(AppCommand::DeleteFiles { paths });
+                    } else {
+                        let _ = cmd_tx.send(AppCommand::TrashFiles { paths });
+                    }
                 }
             });
             action_group.add_action(&action);
         }
 
-        // file.delete
+        // file.delete — permanently delete if in Trash, otherwise move to Trash.
         {
             let file_list = file_list.clone();
             let cmd_tx = command_tx.clone();
+            let state = state.clone();
             let action = gio::SimpleAction::new("delete", None);
             action.connect_activate(move |_, _| {
-                if let Some(entry) = get_selected_entry(&file_list) {
-                    let _ = cmd_tx.send(AppCommand::DeleteFiles { paths: vec![entry.path] });
+                let paths = get_selected_paths(&file_list);
+                if !paths.is_empty() {
+                    let in_trash = {
+                        let s = state.borrow();
+                        is_in_trash(&s.active_tab().active_pane().current_path)
+                    };
+                    if in_trash {
+                        let _ = cmd_tx.send(AppCommand::DeleteFiles { paths });
+                    } else {
+                        let _ = cmd_tx.send(AppCommand::TrashFiles { paths });
+                    }
                 }
             });
             action_group.add_action(&action);
@@ -374,7 +421,7 @@ impl RavenWindow {
             let properties_dialog = properties_dialog.clone();
             let action = gio::SimpleAction::new("properties", None);
             action.connect_activate(move |_, _| {
-                if let Some(entry) = get_selected_entry(&file_list) {
+                if let Some(entry) = get_primary_selected_entry(&file_list) {
                     let dialog = PropertiesDialog::new(&window_ref, &entry, &cmd_tx);
                     dialog.borrow().present();
                     *properties_dialog.borrow_mut() = Some(dialog);
@@ -389,7 +436,7 @@ impl RavenWindow {
             let sidebar = sidebar.clone();
             let action = gio::SimpleAction::new("pin_to_sidebar", None);
             action.connect_activate(move |_, _| {
-                if let Some(entry) = get_selected_entry(&file_list) {
+                if let Some(entry) = get_primary_selected_entry(&file_list) {
                     if entry.is_dir() {
                         if let Some(local) = entry.path.as_local_path() {
                             let bookmark = raven_core::config::Bookmark {
@@ -432,8 +479,7 @@ impl RavenWindow {
         }
 
         // file.suggest_organization
-        let organize_dialog: Rc<RefCell<Option<Rc<OrganizeDialog>>>> =
-            Rc::new(RefCell::new(None));
+        let organize_dialog: Rc<RefCell<Option<Rc<OrganizeDialog>>>> = Rc::new(RefCell::new(None));
         {
             let cmd_tx = command_tx.clone();
             let state = state.clone();
@@ -453,40 +499,78 @@ impl RavenWindow {
             action_group.add_action(&action);
         }
 
-        // file.toggle-tag-N actions (support up to 20 tags)
-        for tag_idx in 0..20 {
+        // file.toggle-tag(tag-name)
+        {
             let file_list = file_list.clone();
             let cmd_tx = command_tx.clone();
-            let action = gio::SimpleAction::new(&format!("toggle-tag-{}", tag_idx), None);
-            action.connect_activate(move |_, _| {
-                if let Some(entry) = get_selected_entry(&file_list) {
-                    if let Some(local) = entry.path.as_local_path() {
-                        // Tag names are loaded dynamically; use index-based approach
-                        // The actual tag name resolution is done in the backend
-                        let _ = cmd_tx.send(AppCommand::AddManualTag {
-                            path: local.to_path_buf(),
-                            tag: format!("__tag_idx_{}", tag_idx),
-                        });
-                    }
+            let context_selected_tags = context_selected_tags.clone();
+            let action = gio::SimpleAction::new("toggle-tag", Some(glib::VariantTy::STRING));
+            action.connect_activate(move |_, parameter| {
+                let Some(tag_name) = parameter.and_then(|value| value.get::<String>()) else {
+                    return;
+                };
+
+                let selected_paths = get_selected_local_paths(&file_list);
+                if selected_paths.is_empty() {
+                    return;
+                }
+
+                let should_remove = context_selected_tags.borrow().contains(&tag_name);
+                for path in selected_paths {
+                    let command = if should_remove {
+                        AppCommand::RemoveManualTag {
+                            path: path.clone(),
+                            tag: tag_name.clone(),
+                        }
+                    } else {
+                        AppCommand::AddManualTag {
+                            path: path.clone(),
+                            tag: tag_name.clone(),
+                        }
+                    };
+                    let _ = cmd_tx.send(command);
                 }
             });
             action_group.add_action(&action);
         }
 
-        // file.open-with-N actions (support up to 20 associations)
-        for assoc_idx in 0..20 {
+        // file.open-with(association-index)
+        {
             let file_list = file_list.clone();
             let state = state.clone();
-            let action = gio::SimpleAction::new(&format!("open-with-{}", assoc_idx), None);
-            action.connect_activate(move |_, _| {
-                if let Some(entry) = get_selected_entry(&file_list) {
-                    let config = state.borrow().config.clone();
-                    crate::file_opener::open_with_association(&entry.path, &config, assoc_idx);
+            let action = gio::SimpleAction::new("open-with", Some(glib::VariantTy::INT32));
+            action.connect_activate(move |_, parameter| {
+                let Some(assoc_idx) = parameter.and_then(|value| value.get::<i32>()) else {
+                    return;
+                };
+                if assoc_idx < 0 {
+                    return;
+                }
+
+                let selected = get_selected_entries(&file_list);
+                if selected.is_empty() {
+                    return;
+                }
+                let config = state.borrow().config.clone();
+                for entry in selected {
+                    if entry.is_dir() {
+                        continue;
+                    }
+                    crate::file_opener::open_with_association(
+                        &entry.path,
+                        &config,
+                        assoc_idx as usize,
+                    );
                 }
             });
             action_group.add_action(&action);
         }
 
+        // Register on the Stack itself so the PopoverMenu (parented to the Stack)
+        // can resolve "file.*" actions by walking up the widget tree.
+        file_list
+            .widget
+            .insert_action_group("file", Some(&action_group));
         file_list
             .column_view
             .insert_action_group("file", Some(&action_group));
@@ -505,15 +589,62 @@ impl RavenWindow {
         ] {
             let context_menu = context_menu.clone();
             let file_list_for_ctx = file_list.clone();
+            let file_list_for_released = file_list_for_ctx.clone();
             let state = state.clone();
+            let context_selected_tags = context_selected_tags.clone();
             let gesture = gtk::GestureClick::new();
             gesture.set_button(3); // Right click
+
+            // connect_pressed: select the item under the cursor immediately on press.
+            // Doing this here (not in connect_released) prevents visual race conditions
+            // where the popover appears before GTK has finished rendering the selection.
+            gesture.connect_pressed(move |gesture, _, x, y| {
+                if let Some(view_widget) = gesture.widget() {
+                    if let Some(mut cur) = view_widget.pick(x, y, gtk::PickFlags::DEFAULT) {
+                        loop {
+                            let found_pos: Option<u32> = unsafe {
+                                cur.data::<Rc<RefCell<u32>>>("item-pos")
+                                    .map(|ptr: std::ptr::NonNull<Rc<RefCell<u32>>>| {
+                                        *ptr.as_ref().borrow()
+                                    })
+                            };
+                            if let Some(pos) = found_pos {
+                                if pos != u32::MAX
+                                    && !file_list_for_ctx.selection.is_selected(pos)
+                                {
+                                    file_list_for_ctx.selection.select_item(pos, true);
+                                }
+                                break;
+                            }
+                            if cur == view_widget {
+                                break;
+                            }
+                            match cur.parent() {
+                                Some(p) => cur = p,
+                                None => break,
+                            }
+                        }
+                    }
+                }
+            });
+
+            // connect_released: populate and show the context menu.
+            // By this point the item is already selected (set in connect_pressed above).
             gesture.connect_released(move |_, _, x, y| {
-                // Update "Open With" submenu before showing
-                if let Some(entry) = get_selected_entry(&file_list_for_ctx) {
+                if let Some(entry) = get_primary_selected_entry(&file_list_for_released) {
                     let config = state.borrow().config.clone();
                     context_menu.update_open_with(&entry, &config);
+
+                    let (all_tags, current_tags) = load_tag_menu_data(&config, &entry);
+                    context_menu.update_tags(&all_tags, &current_tags);
+                    *context_selected_tags.borrow_mut() =
+                        current_tags.into_iter().collect::<HashSet<String>>();
+                } else {
+                    context_menu.clear_open_with();
+                    context_menu.update_tags(&[], &[]);
+                    context_selected_tags.borrow_mut().clear();
                 }
+
                 let rect = gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1);
                 context_menu.popover.set_pointing_to(Some(&rect));
                 context_menu.popover.popup();
@@ -770,9 +901,8 @@ impl RavenWindow {
                     }
                     // Ctrl+I: properties
                     gtk::gdk::Key::i if ctrl => {
-                        if let Some(entry) = get_selected_entry(&file_list_for_key) {
-                            let dialog =
-                                PropertiesDialog::new(&window_for_key, &entry, &cmd_tx);
+                        if let Some(entry) = get_primary_selected_entry(&file_list_for_key) {
+                            let dialog = PropertiesDialog::new(&window_for_key, &entry, &cmd_tx);
                             dialog.borrow().present();
                             *properties_dialog_for_key.borrow_mut() = Some(dialog);
                         }
@@ -780,50 +910,63 @@ impl RavenWindow {
                     }
                     // F2: rename
                     gtk::gdk::Key::F2 if !ctrl && !alt => {
-                        if let Some(entry) = get_selected_entry(&file_list_for_key) {
+                        if let Some(entry) = get_primary_selected_entry(&file_list_for_key) {
                             show_rename_dialog(&window_for_key, &entry, &cmd_tx);
                         }
                         return glib::Propagation::Stop;
                     }
-                    // Delete: trash selected files
+                    // Delete: trash selected files, or permanently delete if already in Trash.
                     gtk::gdk::Key::Delete if !ctrl => {
-                        if let Some(entry) = get_selected_entry(&file_list_for_key) {
-                            let _ = cmd_tx
-                                .send(AppCommand::TrashFiles { paths: vec![entry.path] });
+                        let paths = get_selected_paths(&file_list_for_key);
+                        if !paths.is_empty() {
+                            let in_trash = {
+                                let s = state.borrow();
+                                is_in_trash(&s.active_tab().active_pane().current_path)
+                            };
+                            if in_trash {
+                                let _ = cmd_tx.send(AppCommand::DeleteFiles { paths });
+                            } else {
+                                let _ = cmd_tx.send(AppCommand::TrashFiles { paths });
+                            }
                         }
                         return glib::Propagation::Stop;
                     }
                     // Ctrl+C: copy
                     gtk::gdk::Key::c if ctrl => {
-                        if let Some(entry) = get_selected_entry(&file_list_for_key) {
+                        let paths = get_selected_paths(&file_list_for_key);
+                        if !paths.is_empty() {
                             let mut s = state.borrow_mut();
-                            s.clipboard = Some(ClipboardOp::Copy(vec![entry.path]));
+                            s.clipboard = Some(ClipboardOp::Copy(paths));
                         }
                         return glib::Propagation::Stop;
                     }
                     // Ctrl+X: cut
                     gtk::gdk::Key::x if ctrl => {
-                        if let Some(entry) = get_selected_entry(&file_list_for_key) {
+                        let paths = get_selected_paths(&file_list_for_key);
+                        if !paths.is_empty() {
                             let mut s = state.borrow_mut();
-                            s.clipboard = Some(ClipboardOp::Cut(vec![entry.path]));
+                            s.clipboard = Some(ClipboardOp::Cut(paths));
                         }
                         return glib::Propagation::Stop;
                     }
                     // Ctrl+V: paste
                     gtk::gdk::Key::v if ctrl => {
                         let (clipboard, dest) = {
-                            let mut s = state.borrow_mut();
+                            let s = state.borrow();
                             let dest = s.active_tab().active_pane().current_path.clone();
-                            (s.clipboard.take(), dest)
+                            (s.clipboard.clone(), dest)
                         };
                         match clipboard {
                             Some(ClipboardOp::Copy(sources)) => {
+                                // Copy: keep clipboard so user can paste multiple times
                                 let _ = cmd_tx.send(AppCommand::CopyFiles {
                                     sources,
                                     destination: dest,
                                 });
                             }
                             Some(ClipboardOp::Cut(sources)) => {
+                                // Cut: clear clipboard after paste (each file moves only once)
+                                state.borrow_mut().clipboard = None;
                                 let _ = cmd_tx.send(AppCommand::MoveFiles {
                                     sources,
                                     destination: dest,
@@ -835,10 +978,8 @@ impl RavenWindow {
                     }
                     // Ctrl+,: open settings
                     gtk::gdk::Key::comma if ctrl => {
-                        let dialog = SettingsDialog::new(
-                            &window_for_settings,
-                            state_for_settings.clone(),
-                        );
+                        let dialog =
+                            SettingsDialog::new(&window_for_settings, state_for_settings.clone());
                         dialog.present();
                         return glib::Propagation::Stop;
                     }
@@ -888,6 +1029,7 @@ impl RavenWindow {
                 let show_hidden = {
                     let mut state = self.state.borrow_mut();
                     if let Some(pane) = state.pane_by_id_mut(pane_id) {
+                        pane.current_path = path.clone();
                         pane.entries = entries.clone();
                     }
                     let tab_title = path.file_name().unwrap_or("/").to_string();
@@ -896,8 +1038,7 @@ impl RavenWindow {
                 };
 
                 self.file_list.set_entries(&entries, show_hidden);
-                self.path_bar
-                    .set_path(&path, &self.command_tx, pane_id);
+                self.path_bar.set_path(&path, &self.command_tx, pane_id);
                 self.tab_bar.refresh();
 
                 let count = if show_hidden {
@@ -915,7 +1056,9 @@ impl RavenWindow {
                 self.status_label.set_text(&status);
 
                 // Refresh tag counts for the loaded directory
-                let _ = self.command_tx.send(AppCommand::RefreshTagCounts { pane_id });
+                let _ = self
+                    .command_tx
+                    .send(AppCommand::RefreshTagCounts { pane_id });
             }
 
             AppEvent::DirectoryError { path, error, .. } => {
@@ -941,14 +1084,13 @@ impl RavenWindow {
                         s.active_tab().active_pane().id,
                     )
                 };
-                let _ = self
-                    .command_tx
-                    .send(AppCommand::Navigate { path, pane_id });
+                let _ = self.command_tx.send(AppCommand::Navigate { path, pane_id });
             }
 
             AppEvent::OperationFailed { id, error } => {
                 self.operation_panel.remove_operation(id);
-                self.status_label.set_text(&format!("Operation failed: {}", error));
+                self.status_label
+                    .set_text(&format!("Operation failed: {}", error));
             }
 
             AppEvent::OperationConflict { conflict: _ } => {
@@ -971,7 +1113,8 @@ impl RavenWindow {
             }
 
             AppEvent::SearchError { error } => {
-                self.status_label.set_text(&format!("Search error: {}", error));
+                self.status_label
+                    .set_text(&format!("Search error: {}", error));
             }
 
             // --- Preview events ---
@@ -1027,9 +1170,7 @@ impl RavenWindow {
             }
 
             // --- Network events ---
-            AppEvent::RemoteConnected {
-                protocol, host, ..
-            } => {
+            AppEvent::RemoteConnected { protocol, host, .. } => {
                 self.status_label
                     .set_text(&format!("Connected to {} ({})", host, protocol));
             }
@@ -1140,10 +1281,8 @@ impl RavenWindow {
 
                 if !routed {
                     let size_str = format_size(total_size);
-                    self.status_label.set_text(&format!(
-                        "{}: {} in {} items",
-                        path, size_str, total_items
-                    ));
+                    self.status_label
+                        .set_text(&format!("{}: {} in {} items", path, size_str, total_items));
                 }
             }
 
@@ -1179,14 +1318,8 @@ impl RavenWindow {
                 };
 
                 if !routed {
-                    let state = unit
-                        .active_state
-                        .as_deref()
-                        .unwrap_or("unknown");
-                    let desc = unit
-                        .description
-                        .as_deref()
-                        .unwrap_or(&unit.name);
+                    let state = unit.active_state.as_deref().unwrap_or("unknown");
+                    let desc = unit.description.as_deref().unwrap_or(&unit.name);
                     self.status_label.set_text(&format!(
                         "{}: {} [{}]",
                         path.display(),
@@ -1250,7 +1383,8 @@ impl RavenWindow {
                 if filter.is_empty() {
                     // Clear filter: show all entries
                     self.file_list.set_entries(&entries, show_hidden);
-                    self.status_label.set_text(&format!("{} items", entries.len()));
+                    self.status_label
+                        .set_text(&format!("{} items", entries.len()));
                 } else {
                     let filtered: Vec<_> = entries
                         .into_iter()
@@ -1273,43 +1407,67 @@ impl RavenWindow {
                                         entry.is_dir()
                                     }
                                     raven_core::filter::FileTypeFilter::Symlinks => {
-                                        entry.kind
-                                            == raven_core::entry::EntryKind::Symlink
+                                        entry.kind == raven_core::entry::EntryKind::Symlink
                                     }
                                     raven_core::filter::FileTypeFilter::Images => matches!(
                                         entry.extension(),
                                         Some(
-                                            "jpg" | "jpeg" | "png" | "gif" | "bmp"
-                                                | "svg" | "webp" | "tiff" | "raw"
+                                            "jpg"
+                                                | "jpeg"
+                                                | "png"
+                                                | "gif"
+                                                | "bmp"
+                                                | "svg"
+                                                | "webp"
+                                                | "tiff"
+                                                | "raw"
                                                 | "ico"
                                         )
                                     ),
                                     raven_core::filter::FileTypeFilter::Videos => matches!(
                                         entry.extension(),
                                         Some(
-                                            "mp4" | "mkv" | "avi" | "mov" | "wmv"
-                                                | "flv" | "webm"
+                                            "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm"
                                         )
                                     ),
                                     raven_core::filter::FileTypeFilter::Audio => matches!(
                                         entry.extension(),
                                         Some(
-                                            "mp3" | "flac" | "ogg" | "wav" | "aac"
-                                                | "wma" | "m4a" | "opus"
+                                            "mp3"
+                                                | "flac"
+                                                | "ogg"
+                                                | "wav"
+                                                | "aac"
+                                                | "wma"
+                                                | "m4a"
+                                                | "opus"
                                         )
                                     ),
                                     raven_core::filter::FileTypeFilter::Documents => matches!(
                                         entry.extension(),
                                         Some(
-                                            "pdf" | "doc" | "docx" | "odt" | "txt"
-                                                | "rtf" | "md" | "tex" | "epub"
+                                            "pdf"
+                                                | "doc"
+                                                | "docx"
+                                                | "odt"
+                                                | "txt"
+                                                | "rtf"
+                                                | "md"
+                                                | "tex"
+                                                | "epub"
                                         )
                                     ),
                                     raven_core::filter::FileTypeFilter::Archives => matches!(
                                         entry.extension(),
                                         Some(
-                                            "zip" | "tar" | "gz" | "bz2" | "xz"
-                                                | "7z" | "rar" | "zst"
+                                            "zip"
+                                                | "tar"
+                                                | "gz"
+                                                | "bz2"
+                                                | "xz"
+                                                | "7z"
+                                                | "rar"
+                                                | "zst"
                                         )
                                     ),
                                     raven_core::filter::FileTypeFilter::Custom(_) => true,
@@ -1402,14 +1560,93 @@ impl RavenWindow {
     }
 }
 
-/// Get the currently selected FileEntry from the file list.
-fn get_selected_entry(file_list: &FileListView) -> Option<raven_core::entry::FileEntry> {
-    let pos = file_list.selection.selected();
-    file_list
-        .selection
-        .item(pos)
-        .and_then(|item| item.downcast::<crate::widgets::file_list::FileEntryObject>().ok())
-        .and_then(|obj| obj.entry())
+fn get_selected_entries(file_list: &FileListView) -> Vec<FileEntry> {
+    let mut entries = Vec::new();
+    let item_count = file_list.selection.n_items();
+    for pos in 0..item_count {
+        if !file_list.selection.is_selected(pos) {
+            continue;
+        }
+        if let Some(entry) = file_list
+            .selection
+            .item(pos)
+            .and_then(|item| {
+                item.downcast::<crate::widgets::file_list::FileEntryObject>()
+                    .ok()
+            })
+            .and_then(|obj| obj.entry())
+        {
+            entries.push(entry);
+        }
+    }
+    entries
+}
+
+fn get_primary_selected_entry(file_list: &FileListView) -> Option<FileEntry> {
+    get_selected_entries(file_list).into_iter().next()
+}
+
+fn get_selected_paths(file_list: &FileListView) -> Vec<RavenPath> {
+    get_selected_entries(file_list)
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect()
+}
+
+fn get_selected_local_paths(file_list: &FileListView) -> Vec<PathBuf> {
+    get_selected_entries(file_list)
+        .into_iter()
+        .filter_map(|entry| entry.path.as_local_path().map(|path| path.to_path_buf()))
+        .collect()
+}
+
+/// Returns true when the given path is inside the user's Trash/files directory.
+/// Used to switch Delete-key and context-menu "Delete" from trash → permanent delete.
+fn is_in_trash(path: &RavenPath) -> bool {
+    if let Some(local) = path.as_local_path() {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+        let trash_dir = PathBuf::from(home).join(".local/share/Trash/files");
+        local.starts_with(&trash_dir)
+    } else {
+        false
+    }
+}
+
+fn load_tag_menu_data(config: &AppConfig, entry: &FileEntry) -> (Vec<String>, Vec<String>) {
+    let engine = raven_ai::tag_engine::TagEngine::new(tags_db_path(config));
+    let mut all_tags = engine.tag_names();
+    let current_tags = engine.tags_for_entry(entry);
+    for tag in &current_tags {
+        if !all_tags.contains(tag) {
+            all_tags.push(tag.clone());
+        }
+    }
+    all_tags.sort();
+    all_tags.dedup();
+    (all_tags, current_tags)
+}
+
+fn tags_db_path(config: &AppConfig) -> PathBuf {
+    let tags_dir = config
+        .automation
+        .rules_dir
+        .as_ref()
+        .map(|dir| {
+            PathBuf::from(dir)
+                .parent()
+                .unwrap_or(Path::new("."))
+                .to_path_buf()
+        })
+        .unwrap_or_else(|| {
+            std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .or_else(|| {
+                    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config"))
+                })
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("raven")
+        });
+    tags_dir.join("tags.toml")
 }
 
 /// Show a rename dialog for the given entry.

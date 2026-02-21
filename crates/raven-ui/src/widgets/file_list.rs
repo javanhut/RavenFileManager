@@ -2,10 +2,10 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
-use gtk4 as gtk;
-use gtk::prelude::*;
 use gtk::glib;
+use gtk::prelude::*;
 use gtk::subclass::prelude::*;
+use gtk4 as gtk;
 
 use raven_core::commands::AppCommand;
 use raven_core::config::ViewMode;
@@ -16,12 +16,12 @@ use crate::state::AppState;
 
 // GObject wrapper for FileEntry to use with ColumnView/GridView
 mod imp {
-    use std::cell::RefCell;
     use gtk4::glib;
     use gtk4::glib::Properties;
     use gtk4::prelude::*;
     use gtk4::subclass::prelude::*;
     use raven_core::entry::FileEntry;
+    use std::cell::RefCell;
 
     #[derive(Default, Properties)]
     #[properties(wrapper_type = super::FileEntryObject)]
@@ -164,7 +164,7 @@ pub struct FileListView {
     pub icon_grid_view: gtk::GridView,
     pub preview_grid_view: gtk::GridView,
     pub model: gio::ListStore,
-    pub selection: gtk::SingleSelection,
+    pub selection: gtk::MultiSelection,
 }
 
 impl FileListView {
@@ -174,22 +174,17 @@ impl FileListView {
         pane_id: u32,
     ) -> Self {
         let model = gio::ListStore::new::<FileEntryObject>();
-        let selection = gtk::SingleSelection::new(Some(model.clone()));
+        let selection = gtk::MultiSelection::new(Some(model.clone()));
 
         // === List mode: ColumnView ===
-        let column_view = Self::build_column_view(
-            &selection, &state, &command_tx, pane_id,
-        );
+        let column_view = Self::build_column_view(&selection, &state, &command_tx, pane_id);
 
         // === Icon mode: GridView with 64px icons ===
-        let icon_grid_view = Self::build_icon_grid_view(
-            &selection, &state, &command_tx, pane_id,
-        );
+        let icon_grid_view = Self::build_icon_grid_view(&selection, &state, &command_tx, pane_id);
 
         // === Preview mode: GridView with 128px thumbnails ===
-        let preview_grid_view = Self::build_preview_grid_view(
-            &selection, &state, &command_tx, pane_id,
-        );
+        let preview_grid_view =
+            Self::build_preview_grid_view(&selection, &state, &command_tx, pane_id);
 
         // === Stack assembly ===
         let stack = gtk::Stack::new();
@@ -248,7 +243,7 @@ impl FileListView {
     }
 
     fn build_column_view(
-        selection: &gtk::SingleSelection,
+        selection: &gtk::MultiSelection,
         state: &AppState,
         command_tx: &tokio::sync::mpsc::UnboundedSender<AppCommand>,
         pane_id: u32,
@@ -256,6 +251,7 @@ impl FileListView {
         let column_view = gtk::ColumnView::new(Some(selection.clone()));
         column_view.set_show_column_separators(true);
         column_view.set_show_row_separators(false);
+        column_view.set_enable_rubberband(true);
         column_view.add_css_class("data-table");
 
         // Name column (icon + name)
@@ -287,6 +283,9 @@ impl FileListView {
 
             unsafe {
                 hbox.set_data("drag-uri-cell", uri_cell);
+                // Position cell updated in connect_bind so right-click can select the item.
+                let pos_cell: Rc<RefCell<u32>> = Rc::new(RefCell::new(u32::MAX));
+                hbox.set_data("item-pos", pos_cell);
             }
 
             item.set_child(Some(&hbox));
@@ -295,6 +294,13 @@ impl FileListView {
             let item = item.downcast_ref::<gtk::ListItem>().unwrap();
             let entry_obj = item.item().and_downcast::<FileEntryObject>().unwrap();
             let hbox = item.child().and_downcast::<gtk::Box>().unwrap();
+
+            let pos = item.position();
+            unsafe {
+                if let Some(ptr) = hbox.data::<Rc<RefCell<u32>>>("item-pos") {
+                    *ptr.as_ref().borrow_mut() = pos;
+                }
+            }
             let icon = hbox.first_child().and_downcast::<gtk::Image>().unwrap();
             let label = icon.next_sibling().and_downcast::<gtk::Label>().unwrap();
             icon.set_icon_name(Some(&entry_obj.icon_name()));
@@ -411,7 +417,10 @@ impl FileListView {
 
         // Drop target on column view
         {
-            let drop_target = gtk::DropTarget::new(glib::types::Type::STRING, gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE);
+            let drop_target = gtk::DropTarget::new(
+                glib::types::Type::STRING,
+                gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE,
+            );
             let cmd_tx = command_tx.clone();
             let state_for_drop = state.clone();
             drop_target.connect_drop(move |_target, value, _x, _y| {
@@ -424,7 +433,7 @@ impl FileListView {
     }
 
     fn build_icon_grid_view(
-        selection: &gtk::SingleSelection,
+        selection: &gtk::MultiSelection,
         state: &AppState,
         command_tx: &tokio::sync::mpsc::UnboundedSender<AppCommand>,
         pane_id: u32,
@@ -461,11 +470,17 @@ impl FileListView {
             let uri_for_prepare = uri_cell.clone();
             drag_source.connect_prepare(move |_source, _x, _y| {
                 let uri = uri_for_prepare.borrow().clone();
-                if uri.is_empty() { return None; }
+                if uri.is_empty() {
+                    return None;
+                }
                 Some(gtk::gdk::ContentProvider::for_value(&uri.to_value()))
             });
             vbox.add_controller(drag_source);
-            unsafe { vbox.set_data("drag-uri-cell", uri_cell); }
+            unsafe {
+                vbox.set_data("drag-uri-cell", uri_cell);
+                let pos_cell: Rc<RefCell<u32>> = Rc::new(RefCell::new(u32::MAX));
+                vbox.set_data("item-pos", pos_cell);
+            }
 
             item.set_child(Some(&vbox));
         });
@@ -474,6 +489,14 @@ impl FileListView {
             let item = item.downcast_ref::<gtk::ListItem>().unwrap();
             let entry_obj = item.item().and_downcast::<FileEntryObject>().unwrap();
             let vbox = item.child().and_downcast::<gtk::Box>().unwrap();
+
+            let pos = item.position();
+            unsafe {
+                if let Some(ptr) = vbox.data::<Rc<RefCell<u32>>>("item-pos") {
+                    *ptr.as_ref().borrow_mut() = pos;
+                }
+            }
+
             let icon = vbox.first_child().and_downcast::<gtk::Image>().unwrap();
             let label = icon.next_sibling().and_downcast::<gtk::Label>().unwrap();
 
@@ -510,6 +533,7 @@ impl FileListView {
         let grid_view = gtk::GridView::new(Some(selection.clone()), Some(factory));
         grid_view.set_max_columns(10);
         grid_view.set_min_columns(2);
+        grid_view.set_enable_rubberband(true);
 
         // Activation (double-click)
         let cmd_tx = command_tx.clone();
@@ -521,7 +545,10 @@ impl FileListView {
 
         // Drop target
         {
-            let drop_target = gtk::DropTarget::new(glib::types::Type::STRING, gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE);
+            let drop_target = gtk::DropTarget::new(
+                glib::types::Type::STRING,
+                gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE,
+            );
             let cmd_tx = command_tx.clone();
             let state_for_drop = state.clone();
             drop_target.connect_drop(move |_target, value, _x, _y| {
@@ -534,7 +561,7 @@ impl FileListView {
     }
 
     fn build_preview_grid_view(
-        selection: &gtk::SingleSelection,
+        selection: &gtk::MultiSelection,
         state: &AppState,
         command_tx: &tokio::sync::mpsc::UnboundedSender<AppCommand>,
         pane_id: u32,
@@ -581,11 +608,17 @@ impl FileListView {
             let uri_for_prepare = uri_cell.clone();
             drag_source.connect_prepare(move |_source, _x, _y| {
                 let uri = uri_for_prepare.borrow().clone();
-                if uri.is_empty() { return None; }
+                if uri.is_empty() {
+                    return None;
+                }
                 Some(gtk::gdk::ContentProvider::for_value(&uri.to_value()))
             });
             vbox.add_controller(drag_source);
-            unsafe { vbox.set_data("drag-uri-cell", uri_cell); }
+            unsafe {
+                vbox.set_data("drag-uri-cell", uri_cell);
+                let pos_cell: Rc<RefCell<u32>> = Rc::new(RefCell::new(u32::MAX));
+                vbox.set_data("item-pos", pos_cell);
+            }
 
             item.set_child(Some(&vbox));
         });
@@ -595,9 +628,19 @@ impl FileListView {
             let entry_obj = item.item().and_downcast::<FileEntryObject>().unwrap();
             let vbox = item.child().and_downcast::<gtk::Box>().unwrap();
 
+            let pos = item.position();
+            unsafe {
+                if let Some(ptr) = vbox.data::<Rc<RefCell<u32>>>("item-pos") {
+                    *ptr.as_ref().borrow_mut() = pos;
+                }
+            }
+
             let picture = vbox.first_child().and_downcast::<gtk::Picture>().unwrap();
             let icon_fallback = picture.next_sibling().and_downcast::<gtk::Image>().unwrap();
-            let label = icon_fallback.next_sibling().and_downcast::<gtk::Label>().unwrap();
+            let label = icon_fallback
+                .next_sibling()
+                .and_downcast::<gtk::Label>()
+                .unwrap();
 
             label.set_text(&entry_obj.name());
 
@@ -611,10 +654,12 @@ impl FileListView {
             let is_image = entry_obj
                 .entry()
                 .and_then(|e| e.extension().map(|s| s.to_lowercase()))
-                .map(|ext| matches!(
-                    ext.as_str(),
-                    "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "bmp"
-                ))
+                .map(|ext| {
+                    matches!(
+                        ext.as_str(),
+                        "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "bmp"
+                    )
+                })
                 .unwrap_or(false);
 
             if is_image {
@@ -665,6 +710,7 @@ impl FileListView {
         let grid_view = gtk::GridView::new(Some(selection.clone()), Some(factory));
         grid_view.set_max_columns(8);
         grid_view.set_min_columns(2);
+        grid_view.set_enable_rubberband(true);
 
         // Activation (double-click)
         let cmd_tx = command_tx.clone();
@@ -676,7 +722,10 @@ impl FileListView {
 
         // Drop target
         {
-            let drop_target = gtk::DropTarget::new(glib::types::Type::STRING, gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE);
+            let drop_target = gtk::DropTarget::new(
+                glib::types::Type::STRING,
+                gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE,
+            );
             let cmd_tx = command_tx.clone();
             let state_for_drop = state.clone();
             drop_target.connect_drop(move |_target, value, _x, _y| {
@@ -702,7 +751,11 @@ impl FileListView {
     pub fn update_dir_size(&self, path: &RavenPath, size: u64) {
         let n = self.model.n_items();
         for i in 0..n {
-            if let Some(obj) = self.model.item(i).and_then(|o| o.downcast::<FileEntryObject>().ok()) {
+            if let Some(obj) = self
+                .model
+                .item(i)
+                .and_then(|o| o.downcast::<FileEntryObject>().ok())
+            {
                 let matches = obj
                     .entry()
                     .map(|e| e.is_dir() && &e.path == path)
@@ -721,7 +774,7 @@ impl FileListView {
 
 /// Shared activation handler for all view modes (double-click to navigate/open).
 fn activate_entry(
-    selection: &gtk::SingleSelection,
+    selection: &gtk::MultiSelection,
     pos: u32,
     state: &AppState,
     cmd_tx: &tokio::sync::mpsc::UnboundedSender<AppCommand>,
