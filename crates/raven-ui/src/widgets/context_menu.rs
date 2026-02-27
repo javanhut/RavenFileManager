@@ -33,6 +33,7 @@ impl FileContextMenu {
         let edit_section = gio::Menu::new();
         edit_section.append(Some("Cut"), Some("file.cut"));
         edit_section.append(Some("Copy"), Some("file.copy"));
+        edit_section.append(Some("Copy Path"), Some("file.copy-path"));
         edit_section.append(Some("Paste"), Some("file.paste"));
         edit_section.append(Some("Rename"), Some("file.rename"));
         menu.append_section(None, &edit_section);

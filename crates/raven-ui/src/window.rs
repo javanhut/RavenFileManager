@@ -306,6 +306,30 @@ impl RavenWindow {
             action_group.add_action(&action);
         }
 
+        // file.copy-path: copy file path to system clipboard
+        {
+            let file_list = file_list.clone();
+            let window_ref = window.clone();
+            let action = gio::SimpleAction::new("copy-path", None);
+            action.connect_activate(move |_, _| {
+                let paths = get_selected_paths(&file_list);
+                if !paths.is_empty() {
+                    let text = paths
+                        .iter()
+                        .filter_map(|p| p.as_local_path())
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if !text.is_empty() {
+                        let display = gtk::prelude::RootExt::display(&window_ref);
+                        let clipboard = display.clipboard();
+                        clipboard.set_text(&text);
+                    }
+                }
+            });
+            action_group.add_action(&action);
+        }
+
         // file.cut
         {
             let file_list = file_list.clone();
