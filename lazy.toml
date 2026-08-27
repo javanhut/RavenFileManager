@@ -15,7 +15,6 @@ profile = "release"
 cargo_flags = "--release"
 target_dir = "target/{{profile}}"
 binary = "{{target_dir}}/{{bin_name}}"
-update-caches = "\t@if [ -z \"{{destdir}}\" ]; then  \t\tcommand -v update-desktop-database >/dev/null 2>&1 &&  \t\t\tupdate-desktop-database -q \"{{datadir}}/applications\" || true;  \t\tcommand -v gtk-update-icon-cache >/dev/null 2>&1 &&  \t\t\tgtk-update-icon-cache -qtf \"{{datadir}}/icons/hicolor\" || true;  \tfi"
 
 [commands]
 
@@ -47,7 +46,7 @@ run = [
   "install -Dm644 config/actions.toml \"{{destdir}}{{datadir}}/{{bin_name}}/config/actions.toml\"",
   "install -Dm644 data/resources/style.css \"{{destdir}}{{datadir}}/{{bin_name}}/resources/style.css\"",
   "install -Dm644 data/resources/resources.gresource.xml \"{{destdir}}{{datadir}}/{{bin_name}}/resources/resources.gresource.xml\"",
-  "$(update-caches)",
+  'if [ -z "{{destdir}}" ]; then command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q "{{datadir}}/applications" || true; command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -qtf "{{datadir}}/icons/hicolor" || true; fi',
   "echo \"Installation complete.\"",
 ]
 dep = ["build"]
@@ -60,7 +59,7 @@ run = [
   "rm -f \"{{destdir}}{{datadir}}/metainfo/{{app_id}}.metainfo.xml\"",
   "rm -f \"{{destdir}}{{icondir}}/{{app_id}}.svg\"",
   "rm -rf \"{{destdir}}{{datadir}}/{{bin_name}}\"",
-  "$(update-caches)",
+  'if [ -z "{{destdir}}" ]; then command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q "{{datadir}}/applications" || true; command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -qtf "{{datadir}}/icons/hicolor" || true; fi',
   "echo \"Uninstall complete.\"",
 ]
 
