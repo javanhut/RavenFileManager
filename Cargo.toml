@@ -48,8 +48,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 
+# D-Bus
+# default-features off to drop the async-io reactor; the app already runs a
+# Tokio runtime and zbus should share it rather than start a second one.
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
 # GTK
-gtk4 = "0.10"
+# v4_12 for gtk_column_view_scroll_to / gtk_grid_view_scroll_to, used to bring a
+# revealed item into view. libadwaita v1_4 below already requires GTK 4.12 at
+# runtime, so this raises no minimum that was not there before.
+gtk4 = { version = "0.10", features = ["v4_12"] }
 libadwaita = { version = "0.8", features = ["v1_4"] }
 glib = "0.21"
 gio = "0.21"

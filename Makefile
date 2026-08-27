@@ -54,6 +54,14 @@ install: build
 	install -Dm644 config/actions.toml                          "$(DESTDIR)$(DATADIR)/$(BIN_NAME)/config/actions.toml"
 	install -Dm644 data/resources/style.css                     "$(DESTDIR)$(DATADIR)/$(BIN_NAME)/resources/style.css"
 	install -Dm644 data/resources/resources.gresource.xml       "$(DESTDIR)$(DATADIR)/$(BIN_NAME)/resources/resources.gresource.xml"
+	@# D-Bus activation for org.freedesktop.FileManager1, so a "show in folder"
+	@# from another application starts the file manager when none is running.
+	@# Generated rather than shipped: the service file needs an absolute Exec,
+	@# which is only known once PREFIX is.
+	install -d "$(DESTDIR)$(DATADIR)/dbus-1/services"
+	sed 's|@BINDIR@|$(BINDIR)|g' data/org.freedesktop.FileManager1.service.in \
+		> "$(DESTDIR)$(DATADIR)/dbus-1/services/org.freedesktop.FileManager1.service"
+	chmod 0644 "$(DESTDIR)$(DATADIR)/dbus-1/services/org.freedesktop.FileManager1.service"
 	$(update-caches)
 	@echo "Installation complete."
 
@@ -63,6 +71,7 @@ uninstall:
 	rm -f  "$(DESTDIR)$(DATADIR)/applications/$(APP_ID).desktop"
 	rm -f  "$(DESTDIR)$(DATADIR)/metainfo/$(APP_ID).metainfo.xml"
 	rm -f  "$(DESTDIR)$(ICONDIR)/$(APP_ID).svg"
+	rm -f  "$(DESTDIR)$(DATADIR)/dbus-1/services/org.freedesktop.FileManager1.service"
 	rm -rf "$(DESTDIR)$(DATADIR)/$(BIN_NAME)"
 	$(update-caches)
 	@echo "Uninstall complete."

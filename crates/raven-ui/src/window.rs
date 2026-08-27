@@ -1102,6 +1102,43 @@ impl RavenWindow {
         self.status_label.set_text(&status);
     }
 
+    /// Apply a pending reveal to `pane_id` once its listing holds the paths.
+    ///
+    /// Safe to call at any point: it is a no-op with nothing pending, and it
+    /// leaves the request pending when none of the paths are in the model yet,
+    /// so the directory load still on its way gets its turn.
+    fn apply_pending_selection(&self, pane_id: u32) {
+        let (paths, show_properties) = {
+            let state = self.state.borrow();
+            match state.pane_by_id(pane_id) {
+                Some(pane) if !pane.pending_selection.is_empty() => {
+                    (pane.pending_selection.clone(), pane.pending_properties)
+                }
+                _ => return,
+            }
+        };
+
+        if self.file_list.select_paths(&paths).is_none() {
+            return;
+        }
+
+        {
+            let mut state = self.state.borrow_mut();
+            if let Some(pane) = state.pane_by_id_mut(pane_id) {
+                pane.pending_selection.clear();
+                pane.pending_properties = false;
+            }
+        }
+
+        if show_properties {
+            if let Some(entry) = get_primary_selected_entry(&self.file_list) {
+                let dialog = PropertiesDialog::new(&self.window, &entry, &self.command_tx);
+                dialog.borrow().present();
+                *self.properties_dialog.borrow_mut() = Some(dialog);
+            }
+        }
+    }
+
     pub fn handle_event(&self, event: AppEvent) {
         match event {
             AppEvent::DirectoryLoaded {
@@ -1128,6 +1165,28 @@ impl RavenWindow {
                 self.sidebar.clear_tag_filter();
                 self.search_bar.clear();
                 self.refresh_pane_view(pane_id);
+                // The listing this reveal was waiting on may be this one.
+                self.apply_pending_selection(pane_id);
+            }
+
+            AppEvent::SelectItems {
+                pane_id,
+                paths,
+                show_properties,
+            } => {
+                {
+                    let mut state = self.state.borrow_mut();
+                    if let Some(pane) = state.pane_by_id_mut(pane_id) {
+                        pane.pending_selection = paths;
+                        pane.pending_properties = show_properties;
+                    }
+                }
+                // If the pane already shows the directory, the load that
+                // follows is a refresh and there is nothing to wait for.
+                self.apply_pending_selection(pane_id);
+                // A reveal is a request to look at something, so the window has
+                // to come forward -- the caller is another application.
+                self.window.present();
             }
 
             AppEvent::DirectoryError { path, error, .. } => {

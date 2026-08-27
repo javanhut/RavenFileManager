@@ -315,6 +315,11 @@ impl Default for PluginConfig {
 pub struct DbusConfig {
     pub enabled: bool,
     pub bus_name: String,
+    /// Claim `org.freedesktop.FileManager1` so desktop "show in folder"
+    /// actions reach this window. Only one process can own the name; turn this
+    /// off to leave it to another file manager.
+    #[serde(default = "default_true")]
+    pub file_manager1: bool,
 }
 
 impl Default for DbusConfig {
@@ -322,8 +327,13 @@ impl Default for DbusConfig {
         Self {
             enabled: true,
             bus_name: "com.ravenfilemanager.Raven".to_string(),
+            file_manager1: true,
         }
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// A single keybinding mapping an action to a key combination.

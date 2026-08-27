@@ -30,6 +30,11 @@ pub struct PaneState {
     pub tag_filter: Option<TagFilter>,
     pub history_back: Vec<RavenPath>,
     pub history_forward: Vec<RavenPath>,
+    /// Paths to select once this pane's listing contains them, from a reveal
+    /// request that arrived before the directory finished loading.
+    pub pending_selection: Vec<RavenPath>,
+    /// Raise the properties dialog for the first item of `pending_selection`.
+    pub pending_properties: bool,
 }
 
 impl PaneState {
@@ -44,7 +49,18 @@ impl PaneState {
             tag_filter: None,
             history_back: Vec::new(),
             history_forward: Vec::new(),
+            pending_selection: Vec::new(),
+            pending_properties: false,
         }
+    }
+
+    /// Drop a reveal that has not been applied yet. Called whenever the user
+    /// navigates by hand: they have asked for a different directory than the
+    /// one the reveal was waiting on, and applying it later would select an
+    /// entry in a listing they never asked to see.
+    fn clear_pending_selection(&mut self) {
+        self.pending_selection.clear();
+        self.pending_properties = false;
     }
 
     /// Entries surviving both filters. The two are independent restrictions, so an
@@ -86,6 +102,7 @@ impl PaneState {
         self.history_forward.clear();
         self.current_path = path;
         self.selection.clear();
+        self.clear_pending_selection();
     }
 
     pub fn go_back(&mut self) -> Option<RavenPath> {
@@ -93,6 +110,7 @@ impl PaneState {
             self.history_forward.push(self.current_path.clone());
             self.current_path = prev.clone();
             self.selection.clear();
+            self.clear_pending_selection();
             Some(prev)
         } else {
             None
@@ -104,6 +122,7 @@ impl PaneState {
             self.history_back.push(self.current_path.clone());
             self.current_path = next.clone();
             self.selection.clear();
+            self.clear_pending_selection();
             Some(next)
         } else {
             None

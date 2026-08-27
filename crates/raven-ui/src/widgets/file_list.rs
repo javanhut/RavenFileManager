@@ -770,6 +770,57 @@ impl FileListView {
             }
         }
     }
+
+    /// Select the rows matching `paths` and bring the first of them into view.
+    ///
+    /// Returns the position of the first match, or `None` when the listing
+    /// holds none of them. `None` is a normal outcome rather than a fault: a
+    /// revealed file that happens to be hidden is not in the model at all while
+    /// hidden files are being filtered out.
+    pub fn select_paths(&self, paths: &[RavenPath]) -> Option<u32> {
+        let mut first: Option<u32> = None;
+
+        for i in 0..self.model.n_items() {
+            let Some(obj) = self
+                .model
+                .item(i)
+                .and_then(|o| o.downcast::<FileEntryObject>().ok())
+            else {
+                continue;
+            };
+            let Some(entry) = obj.entry() else {
+                continue;
+            };
+            if !paths.iter().any(|p| p == &entry.path) {
+                continue;
+            }
+
+            // The first match clears whatever the pane had selected before; the
+            // rest add to it, so a multi-file reveal ends up holding exactly
+            // the items that were asked for.
+            self.selection.select_item(i, first.is_none());
+            if first.is_none() {
+                first = Some(i);
+            }
+        }
+
+        if let Some(pos) = first {
+            self.scroll_to_position(pos);
+        }
+        first
+    }
+
+    /// Scroll whichever of the three views is on screen so `pos` is visible.
+    fn scroll_to_position(&self, pos: u32) {
+        // FOCUS rather than SELECT: the selection is set by the caller, and
+        // SELECT here would collapse a multi-file reveal down to one row.
+        let flags = gtk::ListScrollFlags::FOCUS;
+        match self.widget.visible_child_name().as_deref() {
+            Some("icons") => self.icon_grid_view.scroll_to(pos, flags, None),
+            Some("previews") => self.preview_grid_view.scroll_to(pos, flags, None),
+            _ => self.column_view.scroll_to(pos, None, flags, None),
+        }
+    }
 }
 
 /// Shared activation handler for all view modes (double-click to navigate/open).

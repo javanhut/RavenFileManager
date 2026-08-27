@@ -58,6 +58,9 @@ fn main() -> glib::ExitCode {
     let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel::<AppCommand>();
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     let command_tx_for_dbus = command_tx.clone();
+    // The backend re-enters its own queue for RevealItems, which is a navigate
+    // plus a selection rather than a new way to load a directory.
+    let command_tx_for_backend = command_tx.clone();
 
     // Spawn the Tokio runtime on a separate thread
     std::thread::spawn(move || {
@@ -221,6 +224,33 @@ fn main() -> glib::ExitCode {
                 );
             }
 
+            // --- org.freedesktop.FileManager1 ---
+            //
+            // Bound rather than dropped: the connection owns the name, and
+            // releasing it would hand "show in folder" to whatever claims the
+            // name next. It lives as long as the command loop below.
+            let _fm1_connection = if config.dbus.enabled && config.dbus.file_manager1 {
+                match raven_dbus::fm1::serve(command_tx_for_backend.clone(), 0).await {
+                    Ok(connection) => {
+                        tracing::info!("Serving {}", raven_dbus::fm1::FM1_BUS_NAME);
+                        Some(connection)
+                    }
+                    Err(e) => {
+                        // Another file manager holding the name is the usual
+                        // cause and is not a failure worth stopping for; the
+                        // app simply does not receive reveal requests.
+                        tracing::warn!(
+                            "Could not serve {}: {}",
+                            raven_dbus::fm1::FM1_BUS_NAME,
+                            e
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
             // --- System integration ---
             let package_lookup = Arc::new(PackageLookup::new());
             let disk_usage_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -255,6 +285,7 @@ fn main() -> glib::ExitCode {
                 let preview_router = preview_router.clone();
                 let next_op_id = next_op_id.clone();
                 let dbus_service = dbus_service.clone();
+                let command_tx_for_backend = command_tx_for_backend.clone();
                 let package_lookup = package_lookup.clone();
                 let disk_usage_cancel = disk_usage_cancel.clone();
                 let tag_engine = tag_engine.clone();
@@ -1098,6 +1129,38 @@ fn main() -> glib::ExitCode {
                     // --- Refresh ---
                     AppCommand::Refresh { pane_id: _ } => {
                         tracing::debug!("Refresh not directly handled in backend");
+                    }
+
+                    // --- Reveal (org.freedesktop.FileManager1) ---
+                    //
+                    // Announce the selection first, then navigate. The UI holds
+                    // the paths as pending and applies them when the listing
+                    // arrives, so this does not depend on the load finishing
+                    // before or after the event -- and re-navigating to the
+                    // directory the pane already shows still re-emits
+                    // DirectoryLoaded, which is what applies it.
+                    AppCommand::RevealItems {
+                        paths,
+                        pane_id,
+                        show_properties,
+                    } => {
+                        let parent = paths.first().and_then(|p| p.parent());
+                        let _ = event_tx.send(AppEvent::SelectItems {
+                            pane_id,
+                            paths,
+                            show_properties,
+                        });
+                        match parent {
+                            Some(parent) => {
+                                let _ = command_tx_for_backend.send(AppCommand::Navigate {
+                                    path: parent,
+                                    pane_id,
+                                });
+                            }
+                            None => {
+                                tracing::warn!("RevealItems with no containing directory");
+                            }
+                        }
                     }
 
                     // --- Navigation handled in UI ---

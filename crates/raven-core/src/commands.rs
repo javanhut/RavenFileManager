@@ -27,6 +27,18 @@ pub enum AppCommand {
     Refresh {
         pane_id: u32,
     },
+    /// Open the directory containing `paths` and select them within it.
+    ///
+    /// This is what "show me this file" means to a caller that knows the file
+    /// but not the folder -- a browser revealing a finished download, say. All
+    /// paths are expected to share a parent; the backend opens the parent of
+    /// the first and the UI selects whichever of them the listing contains.
+    RevealItems {
+        paths: Vec<RavenPath>,
+        pane_id: u32,
+        /// Also raise the properties dialog for the first revealed item.
+        show_properties: bool,
+    },
 
     // File operations
     CopyFiles {

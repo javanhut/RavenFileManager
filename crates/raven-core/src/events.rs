@@ -16,6 +16,16 @@ pub enum AppEvent {
         path: RavenPath,
         entries: Vec<FileEntry>,
     },
+    /// Select these paths in `pane_id` once its listing contains them.
+    ///
+    /// Sent ahead of the directory load that will bring the entries in, so the
+    /// UI holds it as a pending selection rather than racing the load. Applied
+    /// immediately when the pane already shows the directory.
+    SelectItems {
+        pane_id: u32,
+        paths: Vec<RavenPath>,
+        show_properties: bool,
+    },
     DirectoryError {
         pane_id: u32,
         path: RavenPath,
