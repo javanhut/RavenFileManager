@@ -13,7 +13,7 @@ use raven_core::entry::FileEntry;
 use raven_core::events::AppEvent;
 use raven_core::path::RavenPath;
 
-use crate::state::{AppState, ClipboardOp};
+use crate::state::{AppState, ClipboardOp, TagFilter};
 use crate::widgets::container_banner::ContainerBanner;
 use crate::widgets::context_menu::FileContextMenu;
 use crate::widgets::duplicate_dialog::DuplicateDialog;
@@ -205,16 +205,31 @@ impl RavenWindow {
         let search_bar = Rc::new(SearchBar::new(command_tx.clone(), get_path, pane_id));
         toolbar_view.add_top_bar(&search_bar.revealer);
 
-        // Wire search toggle button to search bar
+        // Wire search toggle button to search bar. The bar can also close itself (its
+        // X button, Escape), so the button tracks the revealer rather than being the
+        // sole owner of the open/closed state.
         {
             let sb = search_bar.clone();
             search_btn.connect_toggled(move |btn| {
+                // Skip when the bar is already in the requested state: this handler
+                // also runs when the button is being synced *from* the revealer below,
+                // and acting again would re-send the dismissal.
                 if btn.is_active() {
-                    sb.show();
-                } else {
+                    if !sb.revealer.reveals_child() {
+                        sb.show();
+                    }
+                } else if sb.revealer.reveals_child() {
                     sb.hide();
                 }
             });
+        }
+        {
+            let btn = search_btn.clone();
+            search_bar
+                .revealer
+                .connect_reveal_child_notify(move |revealer| {
+                    btn.set_active(revealer.reveals_child());
+                });
         }
 
         // --- Content area: sidebar + file list + preview panel ---
@@ -527,6 +542,7 @@ impl RavenWindow {
         {
             let file_list = file_list.clone();
             let cmd_tx = command_tx.clone();
+            let state = state.clone();
             let context_selected_tags = context_selected_tags.clone();
             let action = gio::SimpleAction::new("toggle-tag", Some(glib::VariantTy::STRING));
             action.connect_activate(move |_, parameter| {
@@ -554,6 +570,14 @@ impl RavenWindow {
                     };
                     let _ = cmd_tx.send(command);
                 }
+
+                // Manual tags feed the sidebar counts, so recount the pane's directory.
+                let (path, pane_id) = {
+                    let s = state.borrow();
+                    let pane = s.active_tab().active_pane();
+                    (pane.current_path.clone(), pane.id)
+                };
+                let _ = cmd_tx.send(AppCommand::RefreshTagCounts { pane_id, path });
             });
             action_group.add_action(&action);
         }
@@ -1043,6 +1067,41 @@ impl RavenWindow {
         }
     }
 
+    /// Repaint the file list and status bar for `pane_id` from its stored entries
+    /// and filters.
+    ///
+    /// The search filter and the tag filter are independent restrictions on the same
+    /// listing, so they are resolved together here; each handler updates its own piece
+    /// of pane state and then calls this, rather than painting a view of its own.
+    fn refresh_pane_view(&self, pane_id: u32) {
+        let Some((visible, show_hidden, mut labels)) = ({
+            let s = self.state.borrow();
+            s.pane_by_id(pane_id)
+                .map(|pane| (pane.visible_entries(), s.show_hidden, pane.filter_labels()))
+        }) else {
+            return;
+        };
+
+        self.file_list.set_entries(&visible, show_hidden);
+
+        let shown = if show_hidden {
+            visible.len()
+        } else {
+            visible.iter().filter(|e| !e.is_hidden()).count()
+        };
+        let hidden = visible.len() - shown;
+        if hidden > 0 {
+            labels.insert(0, format!("{} hidden", hidden));
+        }
+
+        let status = if labels.is_empty() {
+            format!("{} items", shown)
+        } else {
+            format!("{} items ({})", shown, labels.join(", "))
+        };
+        self.status_label.set_text(&status);
+    }
+
     pub fn handle_event(&self, event: AppEvent) {
         match event {
             AppEvent::DirectoryLoaded {
@@ -1050,39 +1109,25 @@ impl RavenWindow {
                 path,
                 entries,
             } => {
-                let show_hidden = {
+                {
                     let mut state = self.state.borrow_mut();
                     if let Some(pane) = state.pane_by_id_mut(pane_id) {
                         pane.current_path = path.clone();
-                        pane.entries = entries.clone();
+                        pane.entries = entries;
+                        // A new listing arrives unfiltered.
+                        pane.clear_filters();
                     }
                     let tab_title = path.file_name().unwrap_or("/").to_string();
                     state.active_tab_mut().title = tab_title;
-                    state.show_hidden
-                };
+                }
 
-                self.file_list.set_entries(&entries, show_hidden);
                 self.path_bar.set_path(&path, &self.command_tx, pane_id);
                 self.tab_bar.refresh();
-
-                let count = if show_hidden {
-                    entries.len()
-                } else {
-                    entries.iter().filter(|e| !e.is_hidden()).count()
-                };
-                let total = entries.len();
-                let hidden = total - count;
-                let status = if hidden > 0 {
-                    format!("{} items ({} hidden)", count, hidden)
-                } else {
-                    format!("{} items", count)
-                };
-                self.status_label.set_text(&status);
-
-                // Refresh tag counts for the loaded directory
-                let _ = self
-                    .command_tx
-                    .send(AppCommand::RefreshTagCounts { pane_id });
+                // Pane filters were just reset; clear the widgets that display them so
+                // the UI does not show a query or tag that is no longer applied.
+                self.sidebar.clear_tag_filter();
+                self.search_bar.clear();
+                self.refresh_pane_view(pane_id);
             }
 
             AppEvent::DirectoryError { path, error, .. } => {
@@ -1380,8 +1425,38 @@ impl RavenWindow {
                     .set_text(&format!("Duplicate scan error: {}", error));
             }
 
-            AppEvent::TagCountsUpdated { pane_id: _, counts } => {
-                self.sidebar.update_tag_counts(&counts);
+            AppEvent::TagCountsUpdated { pane_id, counts } => {
+                let active_pane_id = self.state.borrow().active_tab().active_pane().id;
+                if pane_id == active_pane_id {
+                    self.sidebar.update_tag_counts(&counts);
+                }
+            }
+
+            AppEvent::TagFilterApplied {
+                pane_id,
+                path,
+                tag,
+                paths,
+            } => {
+                // A slow listing can land after the pane navigated away; those paths
+                // describe a directory that is no longer on screen.
+                let applied = {
+                    let mut s = self.state.borrow_mut();
+                    match s.pane_by_id_mut(pane_id) {
+                        Some(pane) if pane.current_path == path => {
+                            pane.tag_filter = tag.map(|tag| TagFilter {
+                                tag,
+                                paths: paths.into_iter().collect(),
+                            });
+                            true
+                        }
+                        _ => false,
+                    }
+                };
+
+                if applied {
+                    self.refresh_pane_view(pane_id);
+                }
             }
 
             AppEvent::OrganizationAnalysisComplete {
@@ -1395,163 +1470,13 @@ impl RavenWindow {
 
             // --- Filter ---
             AppEvent::FilterApplied { filter, pane_id } => {
-                let (entries, show_hidden) = {
-                    let s = self.state.borrow();
-                    let entries = s
-                        .pane_by_id(pane_id)
-                        .map(|p| p.entries.clone())
-                        .unwrap_or_default();
-                    (entries, s.show_hidden)
-                };
-
-                if filter.is_empty() {
-                    // Clear filter: show all entries
-                    self.file_list.set_entries(&entries, show_hidden);
-                    self.status_label
-                        .set_text(&format!("{} items", entries.len()));
-                } else {
-                    let filtered: Vec<_> = entries
-                        .into_iter()
-                        .filter(|entry| {
-                            // Query substring match on name
-                            if !filter.query.is_empty()
-                                && !entry
-                                    .name
-                                    .to_lowercase()
-                                    .contains(&filter.query.to_lowercase())
-                            {
-                                return false;
-                            }
-
-                            // File type filter
-                            if !filter.file_types.is_empty() {
-                                let matches_type = filter.file_types.iter().any(|ft| match ft {
-                                    raven_core::filter::FileTypeFilter::Files => entry.is_file(),
-                                    raven_core::filter::FileTypeFilter::Directories => {
-                                        entry.is_dir()
-                                    }
-                                    raven_core::filter::FileTypeFilter::Symlinks => {
-                                        entry.kind == raven_core::entry::EntryKind::Symlink
-                                    }
-                                    raven_core::filter::FileTypeFilter::Images => matches!(
-                                        entry.extension(),
-                                        Some(
-                                            "jpg"
-                                                | "jpeg"
-                                                | "png"
-                                                | "gif"
-                                                | "bmp"
-                                                | "svg"
-                                                | "webp"
-                                                | "tiff"
-                                                | "raw"
-                                                | "ico"
-                                        )
-                                    ),
-                                    raven_core::filter::FileTypeFilter::Videos => matches!(
-                                        entry.extension(),
-                                        Some(
-                                            "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm"
-                                        )
-                                    ),
-                                    raven_core::filter::FileTypeFilter::Audio => matches!(
-                                        entry.extension(),
-                                        Some(
-                                            "mp3"
-                                                | "flac"
-                                                | "ogg"
-                                                | "wav"
-                                                | "aac"
-                                                | "wma"
-                                                | "m4a"
-                                                | "opus"
-                                        )
-                                    ),
-                                    raven_core::filter::FileTypeFilter::Documents => matches!(
-                                        entry.extension(),
-                                        Some(
-                                            "pdf"
-                                                | "doc"
-                                                | "docx"
-                                                | "odt"
-                                                | "txt"
-                                                | "rtf"
-                                                | "md"
-                                                | "tex"
-                                                | "epub"
-                                        )
-                                    ),
-                                    raven_core::filter::FileTypeFilter::Archives => matches!(
-                                        entry.extension(),
-                                        Some(
-                                            "zip"
-                                                | "tar"
-                                                | "gz"
-                                                | "bz2"
-                                                | "xz"
-                                                | "7z"
-                                                | "rar"
-                                                | "zst"
-                                        )
-                                    ),
-                                    raven_core::filter::FileTypeFilter::Custom(_) => true,
-                                });
-                                if !matches_type {
-                                    return false;
-                                }
-                            }
-
-                            // Size filters
-                            if let Some(min) = filter.min_size {
-                                if entry.metadata.size < min {
-                                    return false;
-                                }
-                            }
-                            if let Some(max) = filter.max_size {
-                                if entry.metadata.size > max {
-                                    return false;
-                                }
-                            }
-
-                            // Date filters
-                            if let Some(after) = filter.modified_after {
-                                match entry.metadata.modified {
-                                    Some(m) if m >= after => {}
-                                    _ => return false,
-                                }
-                            }
-                            if let Some(before) = filter.modified_before {
-                                match entry.metadata.modified {
-                                    Some(m) if m <= before => {}
-                                    _ => return false,
-                                }
-                            }
-
-                            // Extension filter
-                            if !filter.extensions.is_empty() {
-                                match entry.extension() {
-                                    Some(ext) => {
-                                        if !filter
-                                            .extensions
-                                            .iter()
-                                            .any(|e| e.eq_ignore_ascii_case(ext))
-                                        {
-                                            return false;
-                                        }
-                                    }
-                                    None => return false,
-                                }
-                            }
-
-                            true
-                        })
-                        .collect();
-
-                    let count = filtered.len();
-                    self.file_list.set_entries(&filtered, show_hidden);
-                    self.status_label
-                        .set_text(&format!("{} items (filtered)", count));
+                {
+                    let mut s = self.state.borrow_mut();
+                    if let Some(pane) = s.pane_by_id_mut(pane_id) {
+                        pane.filter = filter;
+                    }
                 }
+                self.refresh_pane_view(pane_id);
             }
 
             // --- Directory size updates ---

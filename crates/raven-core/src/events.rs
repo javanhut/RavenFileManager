@@ -158,6 +158,17 @@ pub enum AppEvent {
         pane_id: u32,
         counts: Vec<(String, usize)>,
     },
+    /// Entries in the pane's directory carrying the active tag. `tag: None` means the
+    /// filter was cleared and `paths` is empty. Tag matching needs the backend's
+    /// TagEngine, so the resolved paths are sent rather than a spec the UI re-evaluates.
+    TagFilterApplied {
+        pane_id: u32,
+        /// Directory the paths were resolved against. The UI drops the event if the
+        /// pane has since navigated elsewhere.
+        path: RavenPath,
+        tag: Option<String>,
+        paths: Vec<RavenPath>,
+    },
     OrganizationAnalysisComplete {
         path: RavenPath,
         suggestions: Vec<OrganizeSuggestion>,

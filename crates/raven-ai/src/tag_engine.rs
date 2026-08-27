@@ -4,30 +4,67 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use raven_core::entry::FileEntry;
 
+use regex::Regex;
+
 use crate::tags::{ManualTag, TagDatabase, TagMatchRule, TagRule};
 
 /// Engine for computing and managing file tags.
 pub struct TagEngine {
     db: TagDatabase,
     db_path: PathBuf,
+    /// Compiled `NamePattern` rules, keyed by pattern. `None` marks a pattern that
+    /// failed to compile. Counting walks every entry in a directory, so patterns are
+    /// compiled once per rule set rather than once per entry.
+    regex_cache: HashMap<String, Option<Regex>>,
 }
 
 impl TagEngine {
     /// Create a new TagEngine, loading from the given path or using defaults.
     pub fn new(db_path: PathBuf) -> Self {
         let db = Self::load_or_default(&db_path);
-        Self { db, db_path }
+        let regex_cache = Self::build_regex_cache(&db.tag_rules);
+        Self {
+            db,
+            db_path,
+            regex_cache,
+        }
     }
 
     /// Create a TagEngine with default tags (for testing).
     pub fn with_defaults() -> Self {
+        let db = TagDatabase {
+            tag_rules: TagRule::defaults(),
+            manual_tags: Vec::new(),
+        };
+        let regex_cache = Self::build_regex_cache(&db.tag_rules);
         Self {
-            db: TagDatabase {
-                tag_rules: TagRule::defaults(),
-                manual_tags: Vec::new(),
-            },
+            db,
             db_path: PathBuf::from("/tmp/raven-tags-test.toml"),
+            regex_cache,
         }
+    }
+
+    fn build_regex_cache(rules: &[TagRule]) -> HashMap<String, Option<Regex>> {
+        let mut cache = HashMap::new();
+        for rule in rules {
+            for match_rule in &rule.rules {
+                if let TagMatchRule::NamePattern { pattern } = match_rule {
+                    cache.entry(pattern.clone()).or_insert_with(|| {
+                        Regex::new(pattern)
+                            .map_err(|e| {
+                                tracing::warn!(
+                                    "Tag rule '{}' has an invalid pattern '{}': {}",
+                                    rule.name,
+                                    pattern,
+                                    e
+                                );
+                            })
+                            .ok()
+                    });
+                }
+            }
+        }
+        cache
     }
 
     fn load_or_default(path: &Path) -> TagDatabase {
@@ -76,6 +113,27 @@ impl TagEngine {
         tags
     }
 
+    /// Whether `entry` carries `tag`, by rule or by manual assignment.
+    ///
+    /// Filtering a directory checks one known tag per entry, so this avoids the
+    /// per-entry `Vec<String>` that `tags_for_entry` builds.
+    pub fn entry_has_tag(&self, entry: &FileEntry, tag: &str) -> bool {
+        let matches_rule = self
+            .db
+            .tag_rules
+            .iter()
+            .any(|rule| rule.name == tag && self.entry_matches_rule(entry, rule));
+        if matches_rule {
+            return true;
+        }
+
+        let path_str = entry.path.to_string();
+        self.db
+            .manual_tags
+            .iter()
+            .any(|m| m.path == path_str && m.tags.iter().any(|t| t == tag))
+    }
+
     /// Count how many entries match each tag.
     pub fn tag_counts(&self, entries: &[FileEntry]) -> Vec<(String, usize)> {
         let mut counts: HashMap<String, usize> = HashMap::new();
@@ -117,11 +175,13 @@ impl TagEngine {
     /// Add a new tag rule.
     pub fn add_tag_rule(&mut self, rule: TagRule) {
         self.db.tag_rules.push(rule);
+        self.regex_cache = Self::build_regex_cache(&self.db.tag_rules);
     }
 
     /// Remove a tag rule by name.
     pub fn remove_tag_rule(&mut self, name: &str) {
         self.db.tag_rules.retain(|r| r.name != name);
+        self.regex_cache = Self::build_regex_cache(&self.db.tag_rules);
     }
 
     /// Get all tag rules.
@@ -159,9 +219,15 @@ impl TagEngine {
                 }
             }
             TagMatchRule::NamePattern { pattern } => {
-                match regex::Regex::new(pattern) {
-                    Ok(re) => re.is_match(&entry.name),
-                    Err(_) => entry.name.contains(pattern),
+                match self.regex_cache.get(pattern) {
+                    Some(Some(re)) => re.is_match(&entry.name),
+                    // Pattern is known-invalid: fall back to a literal substring match.
+                    Some(None) => entry.name.contains(pattern),
+                    // Not cached (rule set mutated without a rebuild); compile on demand.
+                    None => match Regex::new(pattern) {
+                        Ok(re) => re.is_match(&entry.name),
+                        Err(_) => entry.name.contains(pattern),
+                    },
                 }
             }
             TagMatchRule::MimePrefix { prefix } => {
@@ -386,6 +452,106 @@ mod tests {
         let tags = engine.tags_for_entry(&entry);
         let count = tags.iter().filter(|t| *t == "important").count();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_tag_counts_include_manual_tags() {
+        let mut engine = TagEngine::with_defaults();
+        engine.add_manual_tag("/test/a.jpg", "important");
+        engine.add_manual_tag("/test/b.png", "important");
+
+        let entries = vec![
+            make_file("a.jpg", 100, Some(Utc::now())),
+            make_file("b.png", 200, Some(Utc::now())),
+            make_file("c.rs", 300, Some(Utc::now())),
+        ];
+        let counts = engine.tag_counts(&entries);
+        let important = counts
+            .iter()
+            .find(|(n, _)| n == "important")
+            .map(|(_, c)| *c);
+        assert_eq!(important, Some(2));
+    }
+
+    #[test]
+    fn test_name_pattern_rule_matches_after_add() {
+        let mut engine = TagEngine::with_defaults();
+        engine.add_tag_rule(TagRule {
+            name: "Drafts".to_string(),
+            icon: "document-edit-symbolic".to_string(),
+            color: "#95a5a6".to_string(),
+            rules: vec![TagMatchRule::NamePattern {
+                pattern: r"^draft[-_]".to_string(),
+            }],
+            is_smart: false,
+        });
+
+        let entries = vec![
+            make_file("draft-report.md", 100, None),
+            make_file("draft_notes.md", 100, None),
+            make_file("final.md", 100, None),
+        ];
+        let counts = engine.tag_counts(&entries);
+        let drafts = counts.iter().find(|(n, _)| n == "Drafts").map(|(_, c)| *c);
+        assert_eq!(drafts, Some(2));
+    }
+
+    #[test]
+    fn test_invalid_name_pattern_falls_back_to_substring() {
+        let mut engine = TagEngine::with_defaults();
+        engine.add_tag_rule(TagRule {
+            name: "Broken".to_string(),
+            icon: "dialog-warning-symbolic".to_string(),
+            color: "#c0392b".to_string(),
+            // Unclosed group: never compiles.
+            rules: vec![TagMatchRule::NamePattern {
+                pattern: "log(".to_string(),
+            }],
+            is_smart: false,
+        });
+
+        let entries = vec![
+            make_file("log(1).txt", 100, None),
+            make_file("plain.txt", 100, None),
+        ];
+        let counts = engine.tag_counts(&entries);
+        let broken = counts.iter().find(|(n, _)| n == "Broken").map(|(_, c)| *c);
+        assert_eq!(broken, Some(1));
+    }
+
+    #[test]
+    fn test_entry_has_tag_matches_rule_and_manual() {
+        let mut engine = TagEngine::with_defaults();
+        engine.add_manual_tag("/test/notes.txt", "important");
+
+        let image = make_file("photo.jpg", 100, Some(Utc::now()));
+        assert!(engine.entry_has_tag(&image, "Images"));
+        assert!(!engine.entry_has_tag(&image, "Code"));
+        assert!(!engine.entry_has_tag(&image, "important"));
+
+        let notes = make_file("notes.txt", 100, None);
+        assert!(engine.entry_has_tag(&notes, "important"));
+    }
+
+    #[test]
+    fn test_entry_has_tag_agrees_with_tags_for_entry() {
+        let mut engine = TagEngine::with_defaults();
+        engine.add_manual_tag("/test/big_photo.jpg", "keep");
+
+        let entry = make_file(
+            "big_photo.jpg",
+            200 * 1024 * 1024,
+            Some(Utc::now() - Duration::days(1)),
+        );
+        let listed = engine.tags_for_entry(&entry);
+        for tag in &listed {
+            assert!(
+                engine.entry_has_tag(&entry, tag),
+                "entry_has_tag disagreed on '{}'",
+                tag
+            );
+        }
+        assert!(!engine.entry_has_tag(&entry, "Videos"));
     }
 
     #[test]

@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use gtk4 as gtk;
 use gtk::prelude::*;
 
@@ -9,6 +11,9 @@ pub struct SearchBar {
     pub revealer: gtk::Revealer,
     entry: gtk::SearchEntry,
     mode_dropdown: gtk::DropDown,
+    /// Close the bar and drop the filter it applied. Shared by the close button, the
+    /// Escape key, and `hide()` so every dismissal path behaves identically.
+    dismiss: Rc<dyn Fn()>,
 }
 
 impl SearchBar {
@@ -38,14 +43,28 @@ impl SearchBar {
         entry.set_placeholder_text(Some("Search..."));
         hbox.append(&entry);
 
+        // Dismissing the bar drops the filter it applied, so the listing returns to
+        // the full directory instead of staying narrowed by a hidden query.
+        let dismiss: Rc<dyn Fn()> = {
+            let revealer = revealer.clone();
+            let entry = entry.clone();
+            let cmd_tx = command_tx.clone();
+            Rc::new(move || {
+                revealer.set_reveal_child(false);
+                entry.set_text("");
+                let _ = cmd_tx.send(AppCommand::SetFilter {
+                    filter: raven_core::filter::FilterSpec::empty(),
+                    pane_id,
+                });
+            })
+        };
+
         // Close button
         let close_btn = gtk::Button::from_icon_name("window-close-symbolic");
         close_btn.add_css_class("flat");
         {
-            let revealer = revealer.clone();
-            close_btn.connect_clicked(move |_| {
-                revealer.set_reveal_child(false);
-            });
+            let dismiss = dismiss.clone();
+            close_btn.connect_clicked(move |_| dismiss());
         }
         hbox.append(&close_btn);
 
@@ -57,6 +76,12 @@ impl SearchBar {
         entry.connect_activate(move |entry| {
             let query = entry.text().to_string();
             if query.is_empty() {
+                // An emptied box clears the filter; returning early would strand it
+                // with no way to undo from here.
+                let _ = cmd_tx.send(AppCommand::SetFilter {
+                    filter: raven_core::filter::FilterSpec::empty(),
+                    pane_id,
+                });
                 return;
             }
 
@@ -104,11 +129,11 @@ impl SearchBar {
         });
 
         // Escape closes search bar
-        let revealer_for_key = revealer.clone();
+        let dismiss_for_key = dismiss.clone();
         let key_controller = gtk::EventControllerKey::new();
         key_controller.connect_key_pressed(move |_, key, _, _| {
             if key == gtk::gdk::Key::Escape {
-                revealer_for_key.set_reveal_child(false);
+                dismiss_for_key();
                 return glib::Propagation::Stop;
             }
             glib::Propagation::Proceed
@@ -119,7 +144,14 @@ impl SearchBar {
             revealer,
             entry,
             mode_dropdown,
+            dismiss,
         }
+    }
+
+    /// Empty the query text. Does not touch the applied filter — callers that clear
+    /// pane state (navigation) reset both.
+    pub fn clear(&self) {
+        self.entry.set_text("");
     }
 
     pub fn show(&self) {
@@ -127,8 +159,9 @@ impl SearchBar {
         self.entry.grab_focus();
     }
 
+    /// Close the bar and drop its filter.
     pub fn hide(&self) {
-        self.revealer.set_reveal_child(false);
+        (self.dismiss)();
     }
 
     pub fn toggle(&self) {

@@ -172,6 +172,7 @@ pub enum AppCommand {
     CancelDuplicateScan,
     RefreshTagCounts {
         pane_id: u32,
+        path: RavenPath,
     },
     AddManualTag {
         path: PathBuf,
@@ -181,9 +182,11 @@ pub enum AppCommand {
         path: PathBuf,
         tag: String,
     },
+    /// Restrict `path`'s listing to entries carrying `tag`. `None` clears the filter.
     FilterByTag {
-        tag: String,
+        tag: Option<String>,
         pane_id: u32,
+        path: RavenPath,
     },
     AnalyzeOrganization {
         path: RavenPath,

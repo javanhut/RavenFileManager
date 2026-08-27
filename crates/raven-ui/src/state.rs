@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -8,6 +9,13 @@ use raven_core::filter::FilterSpec;
 use raven_core::path::RavenPath;
 use raven_core::sort::SortSpec;
 
+/// A tag restriction resolved by the backend, which owns the TagEngine.
+#[derive(Debug, Clone)]
+pub struct TagFilter {
+    pub tag: String,
+    pub paths: HashSet<RavenPath>,
+}
+
 /// Per-pane state tracking navigation history and current directory contents.
 #[derive(Debug)]
 pub struct PaneState {
@@ -16,7 +24,10 @@ pub struct PaneState {
     pub entries: Vec<FileEntry>,
     pub selection: Vec<usize>,
     pub sort: SortSpec,
+    /// Search bar / attribute filter. Independent of `tag_filter`; both apply.
     pub filter: FilterSpec,
+    /// Sidebar tag restriction, if one is active.
+    pub tag_filter: Option<TagFilter>,
     pub history_back: Vec<RavenPath>,
     pub history_forward: Vec<RavenPath>,
 }
@@ -30,9 +41,44 @@ impl PaneState {
             selection: Vec::new(),
             sort: SortSpec::default(),
             filter: FilterSpec::default(),
+            tag_filter: None,
             history_back: Vec::new(),
             history_forward: Vec::new(),
         }
+    }
+
+    /// Entries surviving both filters. The two are independent restrictions, so an
+    /// entry must satisfy each one.
+    pub fn visible_entries(&self) -> Vec<FileEntry> {
+        self.entries
+            .iter()
+            .filter(|e| self.filter.matches(e))
+            .filter(|e| {
+                self.tag_filter
+                    .as_ref()
+                    .is_none_or(|t| t.paths.contains(&e.path))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Status-bar labels for whatever is narrowing the listing, e.g.
+    /// `["filtered", "tag: Images"]`. Empty when nothing is active.
+    pub fn filter_labels(&self) -> Vec<String> {
+        let mut labels = Vec::new();
+        if !self.filter.is_empty() {
+            labels.push("filtered".to_string());
+        }
+        if let Some(ref t) = self.tag_filter {
+            labels.push(format!("tag: {}", t.tag));
+        }
+        labels
+    }
+
+    /// Drop both filters. Used when the pane loads a new directory.
+    pub fn clear_filters(&mut self) {
+        self.filter = FilterSpec::default();
+        self.tag_filter = None;
     }
 
     pub fn navigate_to(&mut self, path: RavenPath) {

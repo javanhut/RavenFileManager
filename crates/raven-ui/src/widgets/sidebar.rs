@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use gtk4 as gtk;
 use gtk::prelude::*;
@@ -20,6 +22,8 @@ pub struct Sidebar {
     command_tx: tokio::sync::mpsc::UnboundedSender<AppCommand>,
     pane_id: u32,
     state: AppState,
+    /// Tag currently filtering the pane, so a second click on the same row clears it.
+    active_tag: Rc<RefCell<Option<String>>>,
 }
 
 impl Sidebar {
@@ -219,6 +223,7 @@ impl Sidebar {
             command_tx,
             pane_id,
             state,
+            active_tag: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -545,22 +550,61 @@ impl Sidebar {
             let row = gtk::ListBoxRow::new();
             row.set_child(Some(&hbox));
 
-            // Click to filter by tag
+            // Click to filter by tag; clicking the active tag again clears the filter.
             let cmd_tx = self.command_tx.clone();
             let tag = tag_name.clone();
             let pane_id = self.pane_id;
+            let state = self.state.clone();
+            let active_tag = self.active_tag.clone();
+            let tags_list = self.tags_list.clone();
+            let row_ref = row.clone();
             let gesture = gtk::GestureClick::new();
             gesture.set_button(1);
             gesture.connect_released(move |_, _, _, _| {
+                let Some(path) = state
+                    .borrow()
+                    .pane_by_id(pane_id)
+                    .map(|p| p.current_path.clone())
+                else {
+                    return;
+                };
+
+                let mut active = active_tag.borrow_mut();
+                let next = if active.as_deref() == Some(tag.as_str()) {
+                    None
+                } else {
+                    Some(tag.clone())
+                };
+                *active = next.clone();
+
+                if next.is_some() {
+                    tags_list.select_row(Some(&row_ref));
+                } else {
+                    tags_list.unselect_all();
+                }
+
                 let _ = cmd_tx.send(AppCommand::FilterByTag {
-                    tag: tag.clone(),
+                    tag: next,
                     pane_id,
+                    path,
                 });
             });
             row.add_controller(gesture);
 
             self.tags_list.append(&row);
+
+            // Rows are rebuilt on every recount; keep the active tag visibly selected.
+            if self.active_tag.borrow().as_deref() == Some(tag_name.as_str()) {
+                self.tags_list.select_row(Some(&row));
+            }
         }
+    }
+
+    /// Drop the tag filter without emitting a command. Used when the pane navigates
+    /// away, since the new directory is listed unfiltered.
+    pub fn clear_tag_filter(&self) {
+        *self.active_tag.borrow_mut() = None;
+        self.tags_list.unselect_all();
     }
 
     /// Add a new bookmark to the sidebar and persist to config.

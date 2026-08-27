@@ -303,6 +303,13 @@ fn main() -> glib::ExitCode {
                                         .map(|e| e.path.clone())
                                         .collect();
 
+                                    // Tag counts come from the entries we already listed,
+                                    // so navigation never re-reads the directory for them.
+                                    let tag_counts = {
+                                        let engine = tag_engine.lock().await;
+                                        engine.tag_counts(&entries)
+                                    };
+
                                     let event = AppEvent::DirectoryLoaded {
                                         pane_id,
                                         path,
@@ -310,6 +317,11 @@ fn main() -> glib::ExitCode {
                                     };
                                     dbus_service.handle_event(&event).await;
                                     let _ = event_tx.send(event);
+
+                                    let _ = event_tx.send(AppEvent::TagCountsUpdated {
+                                        pane_id,
+                                        counts: tag_counts,
+                                    });
 
                                     // Phase 1 + 2: cache-first with background validation
                                     for dir_path in dir_paths {
@@ -1391,54 +1403,74 @@ fn main() -> glib::ExitCode {
                         duplicate_scan_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
                     }
 
-                    AppCommand::RefreshTagCounts { pane_id } => {
+                    AppCommand::RefreshTagCounts { pane_id, path } => {
                         let tag_engine = tag_engine.clone();
                         let vfs = vfs.clone();
                         tokio::spawn(async move {
-                            // Get entries from the current pane's path
-                            // We compute counts from what we know: send back tag counts
-                            let engine = tag_engine.lock().await;
-                            // We need entries — but we don't store them in the backend.
-                            // Instead, we'll rely on the tag engine's rules and manually build
-                            // a simple count by asking the engine for all tag names.
-                            // The UI sends this after DirectoryLoaded, so we need the entries.
-                            // Since we can't easily pass entries here, we send empty counts
-                            // and the UI will call with the entries it has.
-                            // For now, send tag names with 0 counts so the sidebar shows them.
-                            let names = engine.tag_names();
-                            let counts: Vec<(String, usize)> =
-                                names.into_iter().map(|n| (n, 0)).collect();
-                            let _ = event_tx.send(AppEvent::TagCountsUpdated { pane_id, counts });
+                            emit_tag_counts(&vfs, &tag_engine, &event_tx, &path, pane_id).await;
                         });
                     }
 
                     AppCommand::AddManualTag { path, tag } => {
-                        let tag_engine = tag_engine.clone();
-                        tokio::spawn(async move {
-                            let mut engine = tag_engine.lock().await;
-                            engine.add_manual_tag(&path.to_string_lossy(), &tag);
-                            if let Err(e) = engine.save() {
-                                tracing::warn!("Failed to save tag database: {}", e);
-                            }
-                        });
+                        // Applied inline so a RefreshTagCounts queued right behind this
+                        // command observes the new tag.
+                        let mut engine = tag_engine.lock().await;
+                        engine.add_manual_tag(&path.to_string_lossy(), &tag);
+                        if let Err(e) = engine.save() {
+                            tracing::warn!("Failed to save tag database: {}", e);
+                        }
                     }
 
                     AppCommand::RemoveManualTag { path, tag } => {
-                        let tag_engine = tag_engine.clone();
-                        tokio::spawn(async move {
-                            let mut engine = tag_engine.lock().await;
-                            engine.remove_manual_tag(&path.to_string_lossy(), &tag);
-                            if let Err(e) = engine.save() {
-                                tracing::warn!("Failed to save tag database: {}", e);
-                            }
-                        });
+                        let mut engine = tag_engine.lock().await;
+                        engine.remove_manual_tag(&path.to_string_lossy(), &tag);
+                        if let Err(e) = engine.save() {
+                            tracing::warn!("Failed to save tag database: {}", e);
+                        }
                     }
 
-                    AppCommand::FilterByTag { tag, pane_id: _ } => {
-                        tracing::info!("Tag filter requested: {}", tag);
-                        // Tag filtering is handled UI-side via FilterApplied
-                        // since entries are stored in AppState on the UI thread
-                    }
+                    AppCommand::FilterByTag { tag, pane_id, path } => match tag {
+                        // Clearing needs no listing.
+                        None => {
+                            let _ = event_tx.send(AppEvent::TagFilterApplied {
+                                pane_id,
+                                path,
+                                tag: None,
+                                paths: Vec::new(),
+                            });
+                        }
+                        Some(tag_name) => {
+                            let tag_engine = tag_engine.clone();
+                            let vfs = vfs.clone();
+                            tokio::spawn(async move {
+                                match vfs.list_dir(&path).await {
+                                    Ok(entries) => {
+                                        let paths: Vec<RavenPath> = {
+                                            let engine = tag_engine.lock().await;
+                                            entries
+                                                .iter()
+                                                .filter(|e| engine.entry_has_tag(e, &tag_name))
+                                                .map(|e| e.path.clone())
+                                                .collect()
+                                        };
+                                        let _ = event_tx.send(AppEvent::TagFilterApplied {
+                                            pane_id,
+                                            path,
+                                            tag: Some(tag_name),
+                                            paths,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        let _ = event_tx.send(AppEvent::Notification {
+                                            title: "Tag filter failed".to_string(),
+                                            message: e.to_string(),
+                                            level: raven_core::events::NotificationLevel::Error,
+                                        });
+                                    }
+                                }
+                            });
+                        }
+                    },
 
                     AppCommand::AnalyzeOrganization { path } => {
                         let vfs = vfs.clone();
@@ -1540,6 +1572,31 @@ fn main() -> glib::ExitCode {
 
     let app = RavenApplication::new(command_tx, event_rx);
     app.run()
+}
+
+/// List `path` and publish per-tag entry counts for `pane_id`.
+///
+/// Navigation computes counts from the entries it has already listed; this is the
+/// path for refreshes that arrive without entries in hand (a tag toggle, a rule change).
+async fn emit_tag_counts(
+    vfs: &Arc<dyn VirtualFileSystem>,
+    tag_engine: &Arc<tokio::sync::Mutex<TagEngine>>,
+    event_tx: &tokio::sync::mpsc::UnboundedSender<AppEvent>,
+    path: &RavenPath,
+    pane_id: u32,
+) {
+    match vfs.list_dir(path).await {
+        Ok(entries) => {
+            let counts = {
+                let engine = tag_engine.lock().await;
+                engine.tag_counts(&entries)
+            };
+            let _ = event_tx.send(AppEvent::TagCountsUpdated { pane_id, counts });
+        }
+        Err(e) => {
+            tracing::warn!("Tag count refresh failed for {}: {}", path, e);
+        }
+    }
 }
 
 fn sort_entries(entries: &mut Vec<FileEntry>, spec: &SortSpec) {
