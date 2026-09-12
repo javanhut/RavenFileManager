@@ -6,6 +6,8 @@ use gtk::prelude::*;
 use raven_core::commands::{AppCommand, SearchMode};
 use raven_core::path::RavenPath;
 
+use crate::state::PaneResolver;
+
 /// Search bar with mode selector (filter/filename/content/smart search).
 pub struct SearchBar {
     pub revealer: gtk::Revealer,
@@ -20,7 +22,7 @@ impl SearchBar {
     pub fn new(
         command_tx: tokio::sync::mpsc::UnboundedSender<AppCommand>,
         get_current_path: impl Fn() -> Option<RavenPath> + 'static,
-        pane_id: u32,
+        pane: PaneResolver,
     ) -> Self {
         let revealer = gtk::Revealer::new();
         revealer.set_transition_type(gtk::RevealerTransitionType::SlideDown);
@@ -49,12 +51,13 @@ impl SearchBar {
             let revealer = revealer.clone();
             let entry = entry.clone();
             let cmd_tx = command_tx.clone();
+            let pane = pane.clone();
             Rc::new(move || {
                 revealer.set_reveal_child(false);
                 entry.set_text("");
                 let _ = cmd_tx.send(AppCommand::SetFilter {
                     filter: raven_core::filter::FilterSpec::empty(),
-                    pane_id,
+                    pane_id: pane(),
                 });
             })
         };
@@ -73,6 +76,7 @@ impl SearchBar {
         // Handle search on Enter
         let cmd_tx = command_tx.clone();
         let mode = mode_dropdown.clone();
+        let pane = pane.clone();
         entry.connect_activate(move |entry| {
             let query = entry.text().to_string();
             if query.is_empty() {
@@ -80,7 +84,7 @@ impl SearchBar {
                 // with no way to undo from here.
                 let _ = cmd_tx.send(AppCommand::SetFilter {
                     filter: raven_core::filter::FilterSpec::empty(),
-                    pane_id,
+                    pane_id: pane(),
                 });
                 return;
             }
@@ -90,7 +94,7 @@ impl SearchBar {
                     // Filter mode — handled by sending SetFilter
                     let _ = cmd_tx.send(AppCommand::SetFilter {
                         filter: raven_core::filter::FilterSpec::with_query(&query),
-                        pane_id,
+                        pane_id: pane(),
                     });
                     return;
                 }
@@ -111,7 +115,7 @@ impl SearchBar {
                         let filter = raven_ai::nl_search::parsed_to_filter(&parsed);
                         let _ = cmd_tx.send(AppCommand::SetFilter {
                             filter,
-                            pane_id,
+                            pane_id: pane(),
                         });
                     }
                     return;

@@ -298,7 +298,12 @@ impl Default for AutomationConfig {
 pub struct PluginConfig {
     pub enabled: bool,
     pub plugin_dirs: Vec<String>,
+    /// Plugins to load at startup. Empty means every discovered plugin that
+    /// is not in `disabled_plugins`.
     pub enabled_plugins: Vec<String>,
+    /// Plugins never loaded at startup, whatever `enabled_plugins` says.
+    #[serde(default)]
+    pub disabled_plugins: Vec<String>,
 }
 
 impl Default for PluginConfig {
@@ -307,6 +312,30 @@ impl Default for PluginConfig {
             enabled: true,
             plugin_dirs: Vec::new(),
             enabled_plugins: Vec::new(),
+            disabled_plugins: Vec::new(),
+        }
+    }
+}
+
+impl PluginConfig {
+    /// Whether the plugin with `id` should be loaded at startup.
+    pub fn is_plugin_enabled(&self, id: &str) -> bool {
+        if self.disabled_plugins.iter().any(|d| d == id) {
+            return false;
+        }
+        self.enabled_plugins.is_empty() || self.enabled_plugins.iter().any(|e| e == id)
+    }
+
+    /// Record the user's choice for one plugin.
+    pub fn set_plugin_enabled(&mut self, id: &str, enabled: bool) {
+        self.disabled_plugins.retain(|d| d != id);
+        if enabled {
+            if !self.enabled_plugins.is_empty() && !self.enabled_plugins.iter().any(|e| e == id) {
+                self.enabled_plugins.push(id.to_string());
+            }
+        } else {
+            self.enabled_plugins.retain(|e| e != id);
+            self.disabled_plugins.push(id.to_string());
         }
     }
 }
@@ -359,28 +388,117 @@ impl Default for KeybindingsConfig {
     }
 }
 
+fn binding(action: &str, key: &str, modifiers: &[&str]) -> Keybinding {
+    Keybinding {
+        action: action.to_string(),
+        key: key.to_string(),
+        modifiers: modifiers.iter().map(|m| m.to_string()).collect(),
+    }
+}
+
+/// Every action the window can dispatch, with its default shortcut. The
+/// settings page lists these; unknown actions in a config file are kept but
+/// do nothing.
 fn default_keybindings() -> Vec<Keybinding> {
     vec![
-        Keybinding { action: "navigate_back".into(), key: "Left".into(), modifiers: vec!["Alt".into()] },
-        Keybinding { action: "navigate_forward".into(), key: "Right".into(), modifiers: vec!["Alt".into()] },
-        Keybinding { action: "navigate_up".into(), key: "Up".into(), modifiers: vec!["Alt".into()] },
-        Keybinding { action: "new_tab".into(), key: "t".into(), modifiers: vec!["Ctrl".into()] },
-        Keybinding { action: "close_tab".into(), key: "w".into(), modifiers: vec!["Ctrl".into()] },
-        Keybinding { action: "toggle_hidden".into(), key: "h".into(), modifiers: vec!["Ctrl".into()] },
-        Keybinding { action: "toggle_search".into(), key: "f".into(), modifiers: vec!["Ctrl".into()] },
-        Keybinding { action: "edit_path".into(), key: "l".into(), modifiers: vec!["Ctrl".into()] },
-        Keybinding { action: "refresh".into(), key: "r".into(), modifiers: vec!["Ctrl".into()] },
-        Keybinding { action: "undo".into(), key: "z".into(), modifiers: vec!["Ctrl".into()] },
-        Keybinding { action: "toggle_preview".into(), key: "space".into(), modifiers: vec![] },
-        Keybinding { action: "properties".into(), key: "i".into(), modifiers: vec!["Ctrl".into()] },
-        Keybinding { action: "rename".into(), key: "F2".into(), modifiers: vec![] },
-        Keybinding { action: "trash".into(), key: "Delete".into(), modifiers: vec![] },
-        Keybinding { action: "copy".into(), key: "c".into(), modifiers: vec!["Ctrl".into()] },
-        Keybinding { action: "cut".into(), key: "x".into(), modifiers: vec!["Ctrl".into()] },
-        Keybinding { action: "paste".into(), key: "v".into(), modifiers: vec!["Ctrl".into()] },
-        Keybinding { action: "select_all".into(), key: "a".into(), modifiers: vec!["Ctrl".into()] },
-        Keybinding { action: "open_settings".into(), key: "comma".into(), modifiers: vec!["Ctrl".into()] },
+        binding("navigate_back", "Left", &["Alt"]),
+        binding("navigate_forward", "Right", &["Alt"]),
+        binding("navigate_up", "Up", &["Alt"]),
+        binding("navigate_home", "Home", &["Alt"]),
+        binding("refresh", "r", &["Ctrl"]),
+        binding("edit_path", "l", &["Ctrl"]),
+        binding("toggle_hidden", "h", &["Ctrl"]),
+        binding("toggle_search", "f", &["Ctrl"]),
+        binding("toggle_preview", "space", &[]),
+        binding("new_tab", "t", &["Ctrl"]),
+        binding("close_tab", "w", &["Ctrl"]),
+        binding("next_tab", "Page_Down", &["Ctrl"]),
+        binding("prev_tab", "Page_Up", &["Ctrl"]),
+        binding("toggle_dual_pane", "F3", &[]),
+        binding("switch_pane", "F6", &[]),
+        binding("copy", "c", &["Ctrl"]),
+        binding("cut", "x", &["Ctrl"]),
+        binding("paste", "v", &["Ctrl"]),
+        binding("trash", "Delete", &[]),
+        binding("delete_permanently", "Delete", &["Shift"]),
+        binding("rename", "F2", &[]),
+        binding("new_folder", "n", &["Ctrl", "Shift"]),
+        binding("new_file", "n", &["Ctrl", "Alt"]),
+        binding("select_all", "a", &["Ctrl"]),
+        binding("undo", "z", &["Ctrl"]),
+        binding("properties", "i", &["Ctrl"]),
+        binding("open_settings", "comma", &["Ctrl"]),
     ]
+}
+
+/// A modifier name as written in a config, reduced to one spelling.
+fn canonical_modifier(name: &str) -> Option<&'static str> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "ctrl" | "control" | "primary" => Some("Ctrl"),
+        "alt" | "meta" | "option" => Some("Alt"),
+        "shift" => Some("Shift"),
+        "super" | "win" | "logo" | "cmd" => Some("Super"),
+        _ => None,
+    }
+}
+
+/// A key name as GDK reports it or a config spells it, reduced to one
+/// spelling: case-insensitive, with a few aliases.
+fn canonical_key(name: &str) -> String {
+    let lower = name.trim().to_ascii_lowercase();
+    match lower.as_str() {
+        "esc" => "escape".to_string(),
+        "return" | "enter" | "kp_enter" => "return".to_string(),
+        "del" => "delete".to_string(),
+        "pgup" | "page_up" | "pageup" | "prior" => "page_up".to_string(),
+        "pgdn" | "page_down" | "pagedown" | "next" => "page_down".to_string(),
+        "+" => "plus".to_string(),
+        "-" => "minus".to_string(),
+        "," => "comma".to_string(),
+        "." => "period".to_string(),
+        "/" => "slash".to_string(),
+        " " => "space".to_string(),
+        _ => lower,
+    }
+}
+
+impl Keybinding {
+    /// Whether a key press with these held modifiers is this binding.
+    pub fn matches(&self, key_name: &str, held: &[&str]) -> bool {
+        if canonical_key(&self.key) != canonical_key(key_name) {
+            return false;
+        }
+        let mut wanted: Vec<&str> = self.modifiers.iter().filter_map(|m| canonical_modifier(m)).collect();
+        let mut have: Vec<&str> = held.iter().filter_map(|m| canonical_modifier(m)).collect();
+        wanted.sort_unstable();
+        wanted.dedup();
+        have.sort_unstable();
+        have.dedup();
+        wanted == have
+    }
+}
+
+impl KeybindingsConfig {
+    /// The action bound to a key press, if any. The first matching binding
+    /// wins, so a user's binding placed earlier shadows a default.
+    pub fn action_for(&self, key_name: &str, held: &[&str]) -> Option<&str> {
+        self.bindings
+            .iter()
+            .find(|b| b.matches(key_name, held))
+            .map(|b| b.action.as_str())
+    }
+
+    /// Add the default shortcut for every action the saved config does not
+    /// mention, so a config written by an older version still reaches the
+    /// newer actions.
+    pub fn with_missing_defaults(mut self) -> Self {
+        for default in default_keybindings() {
+            if !self.bindings.iter().any(|b| b.action == default.action) {
+                self.bindings.push(default);
+            }
+        }
+        self
+    }
 }
 
 /// A file association mapping MIME types or extensions to a specific application.
@@ -414,12 +532,20 @@ impl AppConfig {
 
     pub fn load() -> Self {
         let path = Self::config_path();
-        if path.exists() {
+        let mut config: Self = if path.exists() {
             let content = std::fs::read_to_string(&path).unwrap_or_default();
             toml::from_str(&content).unwrap_or_default()
         } else {
             Self::default()
-        }
+        };
+        config.keybindings = std::mem::take(&mut config.keybindings.bindings)
+            .into_iter()
+            .fold(KeybindingsConfig { bindings: Vec::new() }, |mut acc, b| {
+                acc.bindings.push(b);
+                acc
+            })
+            .with_missing_defaults();
+        config
     }
 
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
@@ -428,5 +554,54 @@ impl AppConfig {
         let content = toml::to_string_pretty(self)?;
         std::fs::write(Self::config_path(), content)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keybinding_matching_ignores_case_and_modifier_order() {
+        let b = binding("new_folder", "N", &["Shift", "Ctrl"]);
+        assert!(b.matches("n", &["Ctrl", "Shift"]));
+        assert!(b.matches("N", &["shift", "control"]));
+        assert!(!b.matches("n", &["Ctrl"]));
+        assert!(!b.matches("m", &["Ctrl", "Shift"]));
+        let plain = binding("rename", "F2", &[]);
+        assert!(plain.matches("F2", &[]));
+        assert!(!plain.matches("F2", &["Ctrl"]));
+    }
+
+    #[test]
+    fn key_aliases_resolve() {
+        let b = binding("next_tab", "PgDn", &["Ctrl"]);
+        assert!(b.matches("Page_Down", &["Ctrl"]));
+        let c = binding("open_settings", ",", &["Ctrl"]);
+        assert!(c.matches("comma", &["Ctrl"]));
+    }
+
+    #[test]
+    fn action_lookup_prefers_the_first_binding() {
+        let cfg = KeybindingsConfig {
+            bindings: vec![
+                binding("custom", "r", &["Ctrl"]),
+                binding("refresh", "r", &["Ctrl"]),
+            ],
+        };
+        assert_eq!(cfg.action_for("r", &["Ctrl"]), Some("custom"));
+        assert_eq!(cfg.action_for("q", &["Ctrl"]), None);
+    }
+
+    #[test]
+    fn missing_defaults_are_filled_in_without_overriding() {
+        let cfg = KeybindingsConfig {
+            bindings: vec![binding("refresh", "F5", &[])],
+        }
+        .with_missing_defaults();
+        let refresh: Vec<_> = cfg.bindings.iter().filter(|b| b.action == "refresh").collect();
+        assert_eq!(refresh.len(), 1);
+        assert_eq!(refresh[0].key, "F5");
+        assert!(cfg.bindings.iter().any(|b| b.action == "toggle_dual_pane"));
     }
 }

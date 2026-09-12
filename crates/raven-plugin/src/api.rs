@@ -1,4 +1,13 @@
-use raven_core::entry::FileEntry;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+
+use tokio::sync::mpsc::UnboundedSender;
+
+use raven_core::commands::AppCommand;
+use raven_core::entry::{EntryKind, EntryMetadata, FileEntry};
+use raven_core::events::{AppEvent, NotificationLevel};
+use raven_core::path::RavenPath;
 
 /// The host API exposed to plugins.
 /// Plugins call these methods to interact with the file manager.
@@ -26,6 +35,135 @@ pub trait PluginApi: Send + Sync {
 
     /// Get a configuration value.
     fn get_config(&self, key: &str) -> Result<Option<String>, String>;
+}
+
+/// The API plugins get in the running file manager: navigation and file
+/// operations go to the backend as commands, notifications to the window as
+/// events, and listings are read straight from the local filesystem.
+pub struct ChannelPluginApi {
+    command_tx: UnboundedSender<AppCommand>,
+    event_tx: UnboundedSender<AppEvent>,
+    /// The pane the user is looking at, kept current by the backend.
+    current_pane: Arc<AtomicU32>,
+    config_dir: PathBuf,
+    /// Actions plugins registered, as (name, label). Shown nowhere yet;
+    /// kept so a plugin's registration is not silently lost.
+    pub actions: Mutex<Vec<(String, String)>>,
+}
+
+impl ChannelPluginApi {
+    pub fn new(
+        command_tx: UnboundedSender<AppCommand>,
+        event_tx: UnboundedSender<AppEvent>,
+        current_pane: Arc<AtomicU32>,
+        config_dir: PathBuf,
+    ) -> Self {
+        Self {
+            command_tx,
+            event_tx,
+            current_pane,
+            config_dir,
+            actions: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn local_paths(paths: &[String]) -> Vec<RavenPath> {
+        paths.iter().map(|p| RavenPath::local(PathBuf::from(p))).collect()
+    }
+}
+
+/// A listing built from `std::fs`, enough for a plugin to look around.
+fn read_local_dir(path: &Path) -> Result<Vec<FileEntry>, String> {
+    let read = std::fs::read_dir(path).map_err(|e| format!("{}: {}", path.display(), e))?;
+    let mut entries = Vec::new();
+    for item in read {
+        let item = item.map_err(|e| e.to_string())?;
+        let name = item.file_name().to_string_lossy().to_string();
+        let full = item.path();
+        let meta = match item.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let kind = if meta.is_dir() {
+            EntryKind::Directory
+        } else if meta.file_type().is_symlink() {
+            EntryKind::Symlink
+        } else {
+            EntryKind::File
+        };
+        let metadata = EntryMetadata {
+            size: meta.len(),
+            is_hidden: name.starts_with('.'),
+            ..EntryMetadata::default()
+        };
+        entries.push(FileEntry::new(name, RavenPath::local(full), kind, metadata));
+    }
+    Ok(entries)
+}
+
+impl PluginApi for ChannelPluginApi {
+    fn list_dir(&self, path: &str) -> Result<Vec<FileEntry>, String> {
+        read_local_dir(Path::new(path))
+    }
+
+    fn get_selection(&self) -> Result<Vec<String>, String> {
+        // The selection lives in the window and is not mirrored to the
+        // backend; plugins get it as hook arguments instead.
+        Err("the selection is not available through the plugin API".to_string())
+    }
+
+    fn navigate(&self, path: &str) -> Result<(), String> {
+        self.command_tx
+            .send(AppCommand::Navigate {
+                path: RavenPath::local(PathBuf::from(path)),
+                pane_id: self.current_pane.load(Ordering::Relaxed),
+            })
+            .map_err(|_| "the file manager is shutting down".to_string())
+    }
+
+    fn copy_files(&self, sources: &[String], dest: &str) -> Result<(), String> {
+        self.command_tx
+            .send(AppCommand::CopyFiles {
+                sources: Self::local_paths(sources),
+                destination: RavenPath::local(PathBuf::from(dest)),
+            })
+            .map_err(|_| "the file manager is shutting down".to_string())
+    }
+
+    fn move_files(&self, sources: &[String], dest: &str) -> Result<(), String> {
+        self.command_tx
+            .send(AppCommand::MoveFiles {
+                sources: Self::local_paths(sources),
+                destination: RavenPath::local(PathBuf::from(dest)),
+            })
+            .map_err(|_| "the file manager is shutting down".to_string())
+    }
+
+    fn register_action(&self, name: &str, label: &str) -> Result<(), String> {
+        self.actions
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?
+            .push((name.to_string(), label.to_string()));
+        Ok(())
+    }
+
+    fn send_notification(&self, title: &str, body: &str) -> Result<(), String> {
+        self.event_tx
+            .send(AppEvent::Notification {
+                title: title.to_string(),
+                message: body.to_string(),
+                level: NotificationLevel::Info,
+            })
+            .map_err(|_| "the file manager is shutting down".to_string())
+    }
+
+    fn get_config(&self, key: &str) -> Result<Option<String>, String> {
+        Ok(match key {
+            "config_dir" => Some(self.config_dir.to_string_lossy().to_string()),
+            "plugins_dir" => Some(self.config_dir.join("plugins").to_string_lossy().to_string()),
+            _ => None,
+        })
+    }
 }
 
 /// A no-op implementation for testing.
@@ -94,6 +232,36 @@ impl PluginApi for MockPluginApi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn channel_api_forwards_navigation_and_notifications() {
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (evt_tx, mut evt_rx) = tokio::sync::mpsc::unbounded_channel();
+        let pane = Arc::new(AtomicU32::new(7));
+        let api = ChannelPluginApi::new(cmd_tx, evt_tx, pane, PathBuf::from("/cfg"));
+
+        api.navigate("/tmp").unwrap();
+        match cmd_rx.try_recv().unwrap() {
+            AppCommand::Navigate { path, pane_id } => {
+                assert_eq!(path, RavenPath::local("/tmp"));
+                assert_eq!(pane_id, 7);
+            }
+            other => panic!("unexpected {:?}", other),
+        }
+
+        api.send_notification("Hi", "there").unwrap();
+        match evt_rx.try_recv().unwrap() {
+            AppEvent::Notification { title, message, .. } => {
+                assert_eq!(title, "Hi");
+                assert_eq!(message, "there");
+            }
+            other => panic!("unexpected {:?}", other),
+        }
+
+        assert_eq!(api.get_config("config_dir").unwrap().as_deref(), Some("/cfg"));
+        assert!(api.get_selection().is_err());
+        assert!(api.list_dir("/definitely/not/here").is_err());
+    }
 
     #[test]
     fn test_mock_api_register_action() {

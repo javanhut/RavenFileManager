@@ -44,12 +44,7 @@ impl GitStatusProvider {
             }
         };
 
-        for item in platform {
-            let item = match item {
-                Ok(i) => i,
-                Err(_) => continue,
-            };
-
+        let items = platform.filter_map(|item| item.ok()).map(|item| {
             let rela_path = match &item {
                 gix::status::index_worktree::Item::Modification { rela_path, .. } => {
                     rela_path.to_string()
@@ -61,29 +56,10 @@ impl GitStatusProvider {
                     dirwalk_entry.rela_path.to_string()
                 }
             };
+            (rela_path, map_item_status(&item))
+        });
 
-            let full_path = repo_root.join(&rela_path);
-
-            // Only include files relevant to our target directory
-            if let Some(parent) = full_path.parent() {
-                if parent == dir {
-                    // Directly in our directory
-                    if let Some(file_name) = full_path.file_name() {
-                        let name = file_name.to_string_lossy().to_string();
-                        let status = map_item_status(&item);
-                        result.insert(name, status);
-                    }
-                } else if let Ok(rel) = full_path.strip_prefix(dir) {
-                    // In a subdirectory — mark the top-level dir
-                    if let Some(first_component) = rel.components().next() {
-                        let dir_name = first_component.as_os_str().to_string_lossy().to_string();
-                        let status = map_item_status(&item);
-                        result.entry(dir_name).or_insert(status);
-                    }
-                }
-            }
-        }
-
+        result.extend(fold_into_dir(&repo_root, dir, items));
         result
     }
 
@@ -98,6 +74,37 @@ impl GitStatusProvider {
             })
             .collect()
     }
+}
+
+/// Reduce repository-relative changed paths to the names shown in `dir`.
+///
+/// A change directly in `dir` keeps its own status. A change deeper down
+/// marks the subdirectory of `dir` it lives under, with the first status
+/// seen winning, so a folder with any change inside it shows as changed.
+/// Paths outside `dir` are dropped.
+pub fn fold_into_dir(
+    repo_root: &Path,
+    dir: &Path,
+    items: impl Iterator<Item = (String, GitFileStatus)>,
+) -> HashMap<String, GitFileStatus> {
+    let mut result = HashMap::new();
+    for (rela_path, status) in items {
+        let full_path = repo_root.join(&rela_path);
+        let Ok(rel) = full_path.strip_prefix(dir) else {
+            continue;
+        };
+        let Some(first) = rel.components().next() else {
+            continue;
+        };
+        let name = first.as_os_str().to_string_lossy().to_string();
+        let direct = rel.components().count() == 1;
+        if direct {
+            result.insert(name, status);
+        } else {
+            result.entry(name).or_insert(status);
+        }
+    }
+    result
 }
 
 fn map_item_status(item: &gix::status::index_worktree::Item) -> GitFileStatus {
@@ -115,5 +122,39 @@ fn map_item_status(item: &gix::status::index_worktree::Item) -> GitFileStatus {
         }
         Item::DirectoryContents { .. } => GitFileStatus::Untracked,
         Item::Rewrite { .. } => GitFileStatus::Renamed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fold_keeps_direct_children_and_marks_subdirectories() {
+        let root = Path::new("/repo");
+        let dir = Path::new("/repo/src");
+        let items = vec![
+            ("src/main.rs".to_string(), GitFileStatus::Modified),
+            ("src/ui/window.rs".to_string(), GitFileStatus::Untracked),
+            ("src/ui/state.rs".to_string(), GitFileStatus::Deleted),
+            ("README.md".to_string(), GitFileStatus::Modified),
+        ];
+        let folded = fold_into_dir(root, dir, items.into_iter());
+        assert_eq!(folded.get("main.rs"), Some(&GitFileStatus::Modified));
+        // The first change seen under a subdirectory is the one it shows.
+        assert_eq!(folded.get("ui"), Some(&GitFileStatus::Untracked));
+        assert!(!folded.contains_key("README.md"));
+        assert_eq!(folded.len(), 2);
+    }
+
+    #[test]
+    fn fold_direct_status_overrides_an_earlier_subdirectory_guess() {
+        let root = Path::new("/repo");
+        let items = vec![
+            ("ui/window.rs".to_string(), GitFileStatus::Modified),
+            ("ui".to_string(), GitFileStatus::Renamed),
+        ];
+        let folded = fold_into_dir(root, root, items.into_iter());
+        assert_eq!(folded.get("ui"), Some(&GitFileStatus::Renamed));
     }
 }

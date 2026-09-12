@@ -77,6 +77,21 @@ impl VfsRouter {
         }
     }
 
+    /// Resolve `remote_path` on the connection `key` names.
+    #[cfg(feature = "sftp")]
+    pub async fn sftp_canonicalize(&self, key: &str, remote_path: &str) -> RavenResult<String> {
+        let sftp = {
+            let connections = self.sftp_connections.lock().await;
+            connections.get(key).cloned()
+        };
+        match sftp {
+            Some(sftp) => sftp.canonicalize(remote_path).await,
+            None => Err(RavenError::Network {
+                message: format!("No SFTP connection found for key: {}", key),
+            }),
+        }
+    }
+
     /// List all active SFTP connection keys.
     #[cfg(feature = "sftp")]
     pub async fn list_sftp_connections(&self) -> Vec<String> {

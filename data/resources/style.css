@@ -115,3 +115,16 @@ gridview > child {
 gridview > child:selected {
     background-color: alpha(@accent_color, 0.15);
 }
+
+/* Dual pane */
+.pane-box {
+    border-top: 2px solid transparent;
+}
+
+.dual-pane .pane-box.active-pane {
+    border-top: 2px solid @accent_bg_color;
+}
+
+.tab-bar button.drop-target {
+    background: alpha(@accent_bg_color, 0.25);
+}

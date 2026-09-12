@@ -1,11 +1,14 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
+use tokio::sync::{oneshot, Mutex};
 use tracing::{debug, error, info, instrument, warn};
 
 use raven_core::error::{RavenError, RavenResult};
 use raven_core::operations::{
-    Operation, OperationId, OperationKind, OperationProgress,
+    ConflictInfo, ConflictStrategy, Operation, OperationId, OperationKind, OperationProgress,
 };
 use raven_core::path::RavenPath;
 use raven_core::vfs::VirtualFileSystem;
@@ -19,6 +22,15 @@ use crate::undo::{TrashEntryRecord, UndoStack};
 /// Callback for reporting operation progress to the UI layer.
 pub type ProgressReporter = Arc<dyn Fn(OperationProgress) + Send + Sync>;
 
+/// Called when a conflict needs a decision the resolver's default strategy
+/// cannot make. The operation blocks until the answer arrives through
+/// [`OperationExecutor::resolve_pending`], or until it is cancelled.
+pub type ConflictPrompt = Arc<dyn Fn(ConflictInfo) + Send + Sync>;
+
+/// How often a blocked operation checks whether it was cancelled while
+/// waiting for a conflict answer.
+const CONFLICT_POLL: Duration = Duration::from_millis(100);
+
 /// Dispatches and executes file operations (copy, move, delete, trash).
 pub struct OperationExecutor {
     copy_engine: CopyEngine,
@@ -27,6 +39,11 @@ pub struct OperationExecutor {
     undo_stack: Arc<UndoStack>,
     queue: Arc<OperationQueue>,
     next_id: AtomicU64,
+    conflict_prompt: Option<ConflictPrompt>,
+    /// Operations blocked on a conflict answer, keyed by operation.
+    pending_conflicts: Mutex<HashMap<OperationId, oneshot::Sender<ConflictStrategy>>>,
+    /// "Apply to all" answers, remembered for the rest of that operation.
+    sticky_strategies: Mutex<HashMap<OperationId, ConflictStrategy>>,
 }
 
 impl OperationExecutor {
@@ -42,6 +59,9 @@ impl OperationExecutor {
             undo_stack,
             queue,
             next_id: AtomicU64::new(1),
+            conflict_prompt: None,
+            pending_conflicts: Mutex::new(HashMap::new()),
+            sticky_strategies: Mutex::new(HashMap::new()),
         })
     }
 
@@ -60,6 +80,27 @@ impl OperationExecutor {
             undo_stack,
             queue,
             next_id: AtomicU64::new(1),
+            conflict_prompt: None,
+            pending_conflicts: Mutex::new(HashMap::new()),
+            sticky_strategies: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Install the prompt that is asked when a conflict needs user input.
+    ///
+    /// Without one, a conflict the default strategy leaves undecided is skipped.
+    pub fn set_conflict_prompt(&mut self, prompt: ConflictPrompt) {
+        self.conflict_prompt = Some(prompt);
+    }
+
+    /// Answer the conflict an operation is blocked on.
+    ///
+    /// Returns `false` when nothing was waiting on `id`, which happens when the
+    /// operation was cancelled or finished before the answer arrived.
+    pub async fn resolve_pending(&self, id: OperationId, strategy: ConflictStrategy) -> bool {
+        match self.pending_conflicts.lock().await.remove(&id) {
+            Some(tx) => tx.send(strategy).is_ok(),
+            None => false,
         }
     }
 
@@ -118,6 +159,10 @@ impl OperationExecutor {
             Ok(()) => info!("operation completed successfully"),
             Err(e) => error!(error = %e, "operation failed"),
         }
+
+        // Answers only ever apply to the operation they were given for.
+        self.sticky_strategies.lock().await.remove(&operation.id);
+        self.pending_conflicts.lock().await.remove(&operation.id);
 
         result
     }
@@ -432,7 +477,11 @@ impl OperationExecutor {
         Ok(())
     }
 
-    /// Check for a conflict and resolve it using the default strategy.
+    /// Check for a conflict and resolve it.
+    ///
+    /// An "apply to all" answer given earlier in the same operation wins;
+    /// otherwise the resolver's default strategy applies, and when that is
+    /// `Ask` the conflict prompt is consulted.
     ///
     /// Returns `Some(destination)` if the operation should proceed, or `None`
     /// if it should be skipped.
@@ -447,28 +496,82 @@ impl OperationExecutor {
             .check_conflict(operation_id, source, destination)
             .await?;
 
-        match conflict {
-            None => Ok(Some(destination.clone())),
-            Some(info) => {
-                let resolution = self.conflict_resolver.resolve_with_default(&info).await?;
-                match resolution {
-                    ConflictResolution::Proceed { destination } => Ok(Some(destination)),
-                    ConflictResolution::Skip => {
-                        debug!(dst = %destination, "skipped due to conflict");
-                        Ok(None)
-                    }
-                    ConflictResolution::NeedsInput { conflict: _ } => {
-                        // Default behavior when user input is needed but unavailable:
-                        // skip the file.
-                        warn!(
-                            dst = %destination,
-                            "conflict requires user input, skipping"
-                        );
-                        Ok(None)
+        let Some(info) = conflict else {
+            return Ok(Some(destination.clone()));
+        };
+
+        let sticky = self
+            .sticky_strategies
+            .lock()
+            .await
+            .get(&operation_id)
+            .copied();
+        let resolution = match sticky {
+            Some(strategy) => self.conflict_resolver.resolve(&info, strategy).await?,
+            None => self.conflict_resolver.resolve_with_default(&info).await?,
+        };
+        let resolution = match resolution {
+            ConflictResolution::NeedsInput { conflict } => self.ask_user(conflict).await?,
+            other => other,
+        };
+
+        match resolution {
+            ConflictResolution::Proceed { destination } => Ok(Some(destination)),
+            ConflictResolution::Skip | ConflictResolution::NeedsInput { .. } => {
+                debug!(dst = %destination, "skipped due to conflict");
+                Ok(None)
+            }
+        }
+    }
+
+    /// Block the operation on the conflict prompt until an answer or a
+    /// cancellation arrives.
+    async fn ask_user(&self, conflict: ConflictInfo) -> RavenResult<ConflictResolution> {
+        let Some(prompt) = &self.conflict_prompt else {
+            warn!(
+                dst = %conflict.destination,
+                "conflict requires user input but nothing can ask, skipping"
+            );
+            return Ok(ConflictResolution::Skip);
+        };
+
+        let id = conflict.operation_id;
+        let (tx, mut rx) = oneshot::channel();
+        self.pending_conflicts.lock().await.insert(id, tx);
+        prompt(conflict.clone());
+
+        let answer = loop {
+            tokio::select! {
+                answer = &mut rx => {
+                    // A dropped sender means the operation was cancelled or
+                    // finished from elsewhere; either way there is no answer.
+                    break answer.unwrap_or(ConflictStrategy::Skip);
+                }
+                _ = tokio::time::sleep(CONFLICT_POLL) => {
+                    if self.queue.is_cancelled(id).await {
+                        self.pending_conflicts.lock().await.remove(&id);
+                        self.queue.clear_cancelled(id).await;
+                        return Err(RavenError::Cancelled);
                     }
                 }
             }
+        };
+
+        // Handing the question back is not an answer.
+        let strategy = match answer {
+            ConflictStrategy::Ask => ConflictStrategy::Skip,
+            other => other,
+        };
+        if matches!(
+            strategy,
+            ConflictStrategy::SkipAll
+                | ConflictStrategy::OverwriteAll
+                | ConflictStrategy::RenameAll
+        ) {
+            self.sticky_strategies.lock().await.insert(id, strategy);
         }
+
+        self.conflict_resolver.resolve(&conflict, strategy).await
     }
 
     /// Get a reference to the undo stack.
@@ -629,6 +732,177 @@ mod tests {
         let content = tokio::fs::read_to_string(&file).await.unwrap();
         assert_eq!(content, "save me");
 
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// A prompt that records what it was asked and can be answered from a test.
+    fn recording_prompt() -> (ConflictPrompt, Arc<std::sync::Mutex<Vec<ConflictInfo>>>) {
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = asked.clone();
+        let prompt: ConflictPrompt = Arc::new(move |info| sink.lock().unwrap().push(info));
+        (prompt, asked)
+    }
+
+    fn copy_op(executor: &OperationExecutor, sources: Vec<PathBuf>, dst: &PathBuf) -> Operation {
+        Operation {
+            id: executor.next_id(),
+            kind: OperationKind::Copy,
+            sources: sources.into_iter().map(RavenPath::local).collect(),
+            destination: Some(RavenPath::local(dst)),
+            status: OperationStatus::Running,
+            priority: OperationPriority::Normal,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ask_without_prompt_skips() {
+        let dir = test_dir().await;
+        let (src_dir, dst_dir) = (dir.join("src"), dir.join("dst"));
+        tokio::fs::create_dir_all(&src_dir).await.unwrap();
+        tokio::fs::create_dir_all(&dst_dir).await.unwrap();
+        tokio::fs::write(src_dir.join("f.txt"), b"new").await.unwrap();
+        tokio::fs::write(dst_dir.join("f.txt"), b"old").await.unwrap();
+
+        let mut executor = make_executor(dir.join("trash"));
+        executor
+            .conflict_resolver_mut()
+            .set_default_strategy(ConflictStrategy::Ask);
+        let op = copy_op(&executor, vec![src_dir.join("f.txt")], &dst_dir);
+        executor.execute(&op, &LocalFs::new(), None).await.unwrap();
+
+        let content = tokio::fs::read_to_string(dst_dir.join("f.txt")).await.unwrap();
+        assert_eq!(content, "old");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_prompt_answer_overwrite() {
+        let dir = test_dir().await;
+        let (src_dir, dst_dir) = (dir.join("src"), dir.join("dst"));
+        tokio::fs::create_dir_all(&src_dir).await.unwrap();
+        tokio::fs::create_dir_all(&dst_dir).await.unwrap();
+        tokio::fs::write(src_dir.join("f.txt"), b"new").await.unwrap();
+        tokio::fs::write(dst_dir.join("f.txt"), b"old").await.unwrap();
+
+        let mut executor = make_executor(dir.join("trash"));
+        executor
+            .conflict_resolver_mut()
+            .set_default_strategy(ConflictStrategy::Ask);
+        let (prompt, asked) = recording_prompt();
+        executor.set_conflict_prompt(prompt);
+        let executor = Arc::new(executor);
+
+        let op = copy_op(&executor, vec![src_dir.join("f.txt")], &dst_dir);
+        let op_id = op.id;
+
+        // Answer from "the UI" once the question has been asked.
+        let answerer = {
+            let executor = executor.clone();
+            let asked = asked.clone();
+            tokio::spawn(async move {
+                while asked.lock().unwrap().is_empty() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                assert!(executor.resolve_pending(op_id, ConflictStrategy::Overwrite).await);
+            })
+        };
+
+        executor.execute(&op, &LocalFs::new(), None).await.unwrap();
+        answerer.await.unwrap();
+
+        let asked = asked.lock().unwrap();
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].operation_id, op_id);
+        let content = tokio::fs::read_to_string(dst_dir.join("f.txt")).await.unwrap();
+        assert_eq!(content, "new");
+        // Nothing is left waiting once the operation is over.
+        assert!(!executor.resolve_pending(op_id, ConflictStrategy::Skip).await);
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_apply_to_all_answers_once() {
+        let dir = test_dir().await;
+        let (src_dir, dst_dir) = (dir.join("src"), dir.join("dst"));
+        tokio::fs::create_dir_all(&src_dir).await.unwrap();
+        tokio::fs::create_dir_all(&dst_dir).await.unwrap();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            tokio::fs::write(src_dir.join(name), b"new").await.unwrap();
+            tokio::fs::write(dst_dir.join(name), b"old").await.unwrap();
+        }
+
+        let mut executor = make_executor(dir.join("trash"));
+        executor
+            .conflict_resolver_mut()
+            .set_default_strategy(ConflictStrategy::Ask);
+        let (prompt, asked) = recording_prompt();
+        executor.set_conflict_prompt(prompt);
+        let executor = Arc::new(executor);
+
+        let sources = ["a.txt", "b.txt", "c.txt"]
+            .iter()
+            .map(|n| src_dir.join(n))
+            .collect();
+        let op = copy_op(&executor, sources, &dst_dir);
+        let op_id = op.id;
+
+        let answerer = {
+            let executor = executor.clone();
+            let asked = asked.clone();
+            tokio::spawn(async move {
+                while asked.lock().unwrap().is_empty() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                executor.resolve_pending(op_id, ConflictStrategy::SkipAll).await;
+            })
+        };
+
+        executor.execute(&op, &LocalFs::new(), None).await.unwrap();
+        answerer.await.unwrap();
+
+        // One question for three conflicts, and every file was left alone.
+        assert_eq!(asked.lock().unwrap().len(), 1);
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            let content = tokio::fs::read_to_string(dst_dir.join(name)).await.unwrap();
+            assert_eq!(content, "old", "{name}");
+        }
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_cancel_while_waiting_on_conflict() {
+        let dir = test_dir().await;
+        let (src_dir, dst_dir) = (dir.join("src"), dir.join("dst"));
+        tokio::fs::create_dir_all(&src_dir).await.unwrap();
+        tokio::fs::create_dir_all(&dst_dir).await.unwrap();
+        tokio::fs::write(src_dir.join("f.txt"), b"new").await.unwrap();
+        tokio::fs::write(dst_dir.join("f.txt"), b"old").await.unwrap();
+
+        let mut executor = make_executor(dir.join("trash"));
+        executor
+            .conflict_resolver_mut()
+            .set_default_strategy(ConflictStrategy::Ask);
+        let (prompt, asked) = recording_prompt();
+        executor.set_conflict_prompt(prompt);
+        let executor = Arc::new(executor);
+
+        let op = copy_op(&executor, vec![src_dir.join("f.txt")], &dst_dir);
+        let op_id = op.id;
+
+        let canceller = {
+            let executor = executor.clone();
+            tokio::spawn(async move {
+                while asked.lock().unwrap().is_empty() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                executor.queue().cancel(op_id).await.unwrap();
+            })
+        };
+
+        let result = executor.execute(&op, &LocalFs::new(), None).await;
+        canceller.await.unwrap();
+        assert!(matches!(result, Err(RavenError::Cancelled)));
+        assert!(!executor.resolve_pending(op_id, ConflictStrategy::Skip).await);
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

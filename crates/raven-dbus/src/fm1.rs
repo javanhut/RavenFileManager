@@ -145,24 +145,40 @@ impl FileManager1 {
     }
 }
 
-/// Claim [`FM1_BUS_NAME`] and serve the interface on the session bus.
+/// Serve the interface on the session bus and ask for [`FM1_BUS_NAME`].
 ///
 /// The returned connection must be held for as long as the name should be
-/// owned -- dropping it releases the name and the next `ShowItems` goes to
-/// whatever claims it after us, or fails.
+/// owned -- dropping it releases the name.
 ///
-/// Acquiring the name fails if another file manager is already running and
-/// holds it. That is a normal condition rather than a fault, so the error is
-/// returned for the caller to log and carry on with.
+/// Every window is its own process, so several of them may be running. The
+/// name is requested without `DoNotQueue`: the first process owns it and the
+/// others wait in the bus's queue, and when the owner closes the next one in
+/// line is handed the name by the bus and starts receiving "show in folder"
+/// requests without doing anything. Only once no window is left does the
+/// bus fall back to D-Bus activation and start a fresh one.
+///
+/// The `bool` says whether this process owns the name right now, as opposed
+/// to waiting in the queue.
 pub async fn serve(
     command_tx: UnboundedSender<AppCommand>,
     pane_id: u32,
-) -> zbus::Result<zbus::Connection> {
-    zbus::connection::Builder::session()?
-        .name(FM1_BUS_NAME)?
+) -> zbus::Result<(zbus::Connection, bool)> {
+    let connection = zbus::connection::Builder::session()?
         .serve_at(FM1_OBJECT_PATH, FileManager1::new(command_tx, pane_id))?
         .build()
-        .await
+        .await?;
+    // zbus's default flags are AllowReplacement | ReplaceExisting | DoNotQueue,
+    // which is the opposite of what is wanted: every new window would take the
+    // name and drop it on the floor when closed. No flags means "wait my turn".
+    let flags = enumflags2::BitFlags::<zbus::fdo::RequestNameFlags>::empty();
+    let reply = connection
+        .request_name_with_flags(FM1_BUS_NAME, flags)
+        .await?;
+    let owns = matches!(
+        reply,
+        zbus::fdo::RequestNameReply::PrimaryOwner | zbus::fdo::RequestNameReply::AlreadyOwner
+    );
+    Ok((connection, owns))
 }
 
 #[cfg(test)]

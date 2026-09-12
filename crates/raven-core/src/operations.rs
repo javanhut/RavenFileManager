@@ -66,6 +66,27 @@ pub enum ConflictStrategy {
     OverwriteAll,
 }
 
+impl std::str::FromStr for ConflictStrategy {
+    type Err = String;
+
+    /// Parse the `default_conflict_strategy` config value. Accepts the enum
+    /// names in snake_case or kebab-case, case-insensitively.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let key = s.trim().to_ascii_lowercase().replace('-', "_");
+        Ok(match key.as_str() {
+            "ask" => Self::Ask,
+            "skip" => Self::Skip,
+            "overwrite" | "replace" => Self::Overwrite,
+            "overwrite_older" | "replace_older" => Self::OverwriteOlder,
+            "rename" => Self::Rename,
+            "rename_all" => Self::RenameAll,
+            "skip_all" => Self::SkipAll,
+            "overwrite_all" | "replace_all" => Self::OverwriteAll,
+            other => return Err(format!("unknown conflict strategy '{}'", other)),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConflictInfo {
     pub operation_id: OperationId,
@@ -100,5 +121,21 @@ impl Operation {
             status: OperationStatus::Pending,
             priority: OperationPriority::Normal,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_conflict_strategy_names() {
+        assert_eq!("ask".parse::<ConflictStrategy>(), Ok(ConflictStrategy::Ask));
+        assert_eq!(
+            " Overwrite-Older ".parse::<ConflictStrategy>(),
+            Ok(ConflictStrategy::OverwriteOlder)
+        );
+        assert_eq!("rename".parse::<ConflictStrategy>(), Ok(ConflictStrategy::Rename));
+        assert!("merge".parse::<ConflictStrategy>().is_err());
     }
 }

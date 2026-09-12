@@ -13,6 +13,8 @@ raven-ops = { workspace = true }
 raven-search = { workspace = true }
 raven-preview = { workspace = true }
 raven-git = { workspace = true }
+raven-automation = { workspace = true }
+raven-plugin = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }

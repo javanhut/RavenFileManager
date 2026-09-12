@@ -1,3 +1,5 @@
+pub mod conflict_dialog;
+pub mod connect_dialog;
 pub mod container_banner;
 pub mod context_menu;
 pub mod duplicate_dialog;
@@ -11,3 +13,8 @@ pub mod search_bar;
 pub mod settings_dialog;
 pub mod sidebar;
 pub mod tab_bar;
+pub mod automation_rule_dialog;
+pub mod settings_actions;
+pub mod settings_automation;
+pub mod settings_plugins;
+pub mod pane_view;

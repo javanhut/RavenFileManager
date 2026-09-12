@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 
@@ -10,9 +11,10 @@ use gtk4 as gtk;
 use raven_core::commands::AppCommand;
 use raven_core::config::ViewMode;
 use raven_core::entry::{EntryKind, FileEntry};
+use raven_core::events::GitFileStatus;
 use raven_core::path::RavenPath;
 
-use crate::state::AppState;
+use crate::state::{AppState, PaneResolver};
 
 // GObject wrapper for FileEntry to use with ColumnView/GridView
 mod imp {
@@ -40,6 +42,9 @@ mod imp {
         is_dir: RefCell<bool>,
         #[property(get, set)]
         is_hidden: RefCell<bool>,
+        /// One-letter version-control mark, empty when clean or unknown.
+        #[property(get, set)]
+        vcs_status: RefCell<String>,
         pub entry: RefCell<Option<FileEntry>>,
     }
 
@@ -84,6 +89,72 @@ impl FileEntryObject {
 
     pub fn entry(&self) -> Option<FileEntry> {
         self.imp().entry.borrow().clone()
+    }
+
+    /// Show `status` in the version-control column; `None` clears it.
+    pub fn set_vcs(&self, status: Option<GitFileStatus>) {
+        let code = status.map(|s| vcs_mark(s).0).unwrap_or("");
+        if self.vcs_status() != code {
+            self.set_vcs_status(code);
+        }
+    }
+}
+
+/// How a status is shown: its mark, the CSS class colouring it, and the
+/// tooltip spelling it out.
+pub fn vcs_mark(status: GitFileStatus) -> (&'static str, &'static str, &'static str) {
+    match status {
+        GitFileStatus::Modified => ("M", "git-modified", "Modified"),
+        GitFileStatus::Added => ("A", "git-added", "Added"),
+        GitFileStatus::Deleted => ("D", "git-deleted", "Deleted"),
+        GitFileStatus::Renamed => ("R", "git-modified", "Renamed"),
+        GitFileStatus::Untracked => ("?", "git-untracked", "Untracked"),
+        GitFileStatus::Ignored => ("!", "dim-label", "Ignored"),
+        GitFileStatus::Conflict => ("U", "git-conflict", "Conflict"),
+        GitFileStatus::Clean => ("", "", ""),
+    }
+}
+
+/// The reverse of [`vcs_mark`]: the status a mark stands for.
+fn status_for_mark(mark: &str) -> Option<GitFileStatus> {
+    [
+        GitFileStatus::Modified,
+        GitFileStatus::Added,
+        GitFileStatus::Deleted,
+        GitFileStatus::Renamed,
+        GitFileStatus::Untracked,
+        GitFileStatus::Ignored,
+        GitFileStatus::Conflict,
+    ]
+    .into_iter()
+    .find(|s| vcs_mark(*s).0 == mark)
+}
+
+const VCS_CLASSES: [&str; 6] = [
+    "git-modified",
+    "git-added",
+    "git-deleted",
+    "git-untracked",
+    "git-conflict",
+    "dim-label",
+];
+
+/// Paint a version-control mark into its column label.
+fn render_vcs_mark(label: &gtk::Label, mark: &str) {
+    for class in VCS_CLASSES {
+        label.remove_css_class(class);
+    }
+    match status_for_mark(mark) {
+        Some(status) => {
+            let (code, class, tooltip) = vcs_mark(status);
+            label.set_text(code);
+            label.add_css_class(class);
+            label.set_tooltip_text(Some(tooltip));
+        }
+        None => {
+            label.set_text("");
+            label.set_tooltip_text(None);
+        }
     }
 }
 
@@ -171,20 +242,20 @@ impl FileListView {
     pub fn new(
         state: AppState,
         command_tx: tokio::sync::mpsc::UnboundedSender<AppCommand>,
-        pane_id: u32,
+        pane: PaneResolver,
     ) -> Self {
         let model = gio::ListStore::new::<FileEntryObject>();
         let selection = gtk::MultiSelection::new(Some(model.clone()));
 
         // === List mode: ColumnView ===
-        let column_view = Self::build_column_view(&selection, &state, &command_tx, pane_id);
+        let column_view = Self::build_column_view(&selection, &state, &command_tx, &pane);
 
         // === Icon mode: GridView with 64px icons ===
-        let icon_grid_view = Self::build_icon_grid_view(&selection, &state, &command_tx, pane_id);
+        let icon_grid_view = Self::build_icon_grid_view(&selection, &state, &command_tx, &pane);
 
         // === Preview mode: GridView with 128px thumbnails ===
         let preview_grid_view =
-            Self::build_preview_grid_view(&selection, &state, &command_tx, pane_id);
+            Self::build_preview_grid_view(&selection, &state, &command_tx, &pane);
 
         // === Stack assembly ===
         let stack = gtk::Stack::new();
@@ -246,7 +317,7 @@ impl FileListView {
         selection: &gtk::MultiSelection,
         state: &AppState,
         command_tx: &tokio::sync::mpsc::UnboundedSender<AppCommand>,
-        pane_id: u32,
+        pane: &PaneResolver,
     ) -> gtk::ColumnView {
         let column_view = gtk::ColumnView::new(Some(selection.clone()));
         column_view.set_show_column_separators(true);
@@ -260,7 +331,7 @@ impl FileListView {
             let item = item.downcast_ref::<gtk::ListItem>().unwrap();
             let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
             let icon = gtk::Image::new();
-            icon.set_pixel_size(20);
+            icon.add_css_class("raven-list-icon");
             let label = gtk::Label::new(None);
             label.set_halign(gtk::Align::Start);
             label.set_ellipsize(gtk::pango::EllipsizeMode::End);
@@ -344,6 +415,48 @@ impl FileListView {
         name_col.set_resizable(true);
         column_view.append_column(&name_col);
 
+        // Version-control column. Status arrives after the listing, so the
+        // label follows the property rather than reading it once at bind.
+        let vcs_factory = gtk::SignalListItemFactory::new();
+        vcs_factory.connect_setup(|_, item| {
+            let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+            let label = gtk::Label::new(None);
+            label.set_halign(gtk::Align::Center);
+            label.add_css_class("monospace");
+            item.set_child(Some(&label));
+        });
+        vcs_factory.connect_bind(|_, item| {
+            let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+            let entry_obj = item.item().and_downcast::<FileEntryObject>().unwrap();
+            let label = item.child().and_downcast::<gtk::Label>().unwrap();
+            render_vcs_mark(&label, &entry_obj.vcs_status());
+            let label_for_notify = label.clone();
+            let handler = entry_obj.connect_vcs_status_notify(move |obj| {
+                render_vcs_mark(&label_for_notify, &obj.vcs_status());
+            });
+            unsafe {
+                label.set_data("vcs-notify-handler", handler);
+            }
+        });
+        vcs_factory.connect_unbind(|_, item| {
+            let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+            let Some(entry_obj) = item.item().and_downcast::<FileEntryObject>() else {
+                return;
+            };
+            let Some(label) = item.child().and_downcast::<gtk::Label>() else {
+                return;
+            };
+            let handler: Option<glib::SignalHandlerId> =
+                unsafe { label.steal_data("vcs-notify-handler") };
+            if let Some(handler) = handler {
+                entry_obj.disconnect(handler);
+            }
+        });
+        let vcs_col = gtk::ColumnViewColumn::new(Some("VCS"), Some(vcs_factory));
+        vcs_col.set_fixed_width(56);
+        vcs_col.set_resizable(true);
+        column_view.append_column(&vcs_col);
+
         // Size column
         let size_factory = gtk::SignalListItemFactory::new();
         size_factory.connect_setup(|_, item| {
@@ -411,8 +524,9 @@ impl FileListView {
         let cmd_tx = command_tx.clone();
         let sel_model = selection.clone();
         let state_for_activate = state.clone();
+        let pane_for_activate = pane.clone();
         column_view.connect_activate(move |_, pos| {
-            activate_entry(&sel_model, pos, &state_for_activate, &cmd_tx, pane_id);
+            activate_entry(&sel_model, pos, &state_for_activate, &cmd_tx, pane_for_activate());
         });
 
         // Drop target on column view
@@ -423,8 +537,9 @@ impl FileListView {
             );
             let cmd_tx = command_tx.clone();
             let state_for_drop = state.clone();
+            let pane_for_drop = pane.clone();
             drop_target.connect_drop(move |_target, value, _x, _y| {
-                handle_file_drop(value, &state_for_drop, &cmd_tx)
+                handle_file_drop(value, &state_for_drop, &cmd_tx, pane_for_drop())
             });
             column_view.add_controller(drop_target);
         }
@@ -436,7 +551,7 @@ impl FileListView {
         selection: &gtk::MultiSelection,
         state: &AppState,
         command_tx: &tokio::sync::mpsc::UnboundedSender<AppCommand>,
-        pane_id: u32,
+        pane: &PaneResolver,
     ) -> gtk::GridView {
         let factory = gtk::SignalListItemFactory::new();
 
@@ -451,7 +566,7 @@ impl FileListView {
             vbox.set_margin_end(4);
 
             let icon = gtk::Image::new();
-            icon.set_pixel_size(64);
+            icon.add_css_class("raven-grid-icon");
             vbox.append(&icon);
 
             let label = gtk::Label::new(None);
@@ -539,8 +654,9 @@ impl FileListView {
         let cmd_tx = command_tx.clone();
         let sel = selection.clone();
         let state_for_activate = state.clone();
+        let pane_for_activate = pane.clone();
         grid_view.connect_activate(move |_, pos| {
-            activate_entry(&sel, pos, &state_for_activate, &cmd_tx, pane_id);
+            activate_entry(&sel, pos, &state_for_activate, &cmd_tx, pane_for_activate());
         });
 
         // Drop target
@@ -551,8 +667,9 @@ impl FileListView {
             );
             let cmd_tx = command_tx.clone();
             let state_for_drop = state.clone();
+            let pane_for_drop = pane.clone();
             drop_target.connect_drop(move |_target, value, _x, _y| {
-                handle_file_drop(value, &state_for_drop, &cmd_tx)
+                handle_file_drop(value, &state_for_drop, &cmd_tx, pane_for_drop())
             });
             grid_view.add_controller(drop_target);
         }
@@ -564,7 +681,7 @@ impl FileListView {
         selection: &gtk::MultiSelection,
         state: &AppState,
         command_tx: &tokio::sync::mpsc::UnboundedSender<AppCommand>,
-        pane_id: u32,
+        pane: &PaneResolver,
     ) -> gtk::GridView {
         let factory = gtk::SignalListItemFactory::new();
 
@@ -588,7 +705,7 @@ impl FileListView {
 
             // Fallback icon (for non-images)
             let icon_fallback = gtk::Image::new();
-            icon_fallback.set_pixel_size(128);
+            icon_fallback.add_css_class("raven-preview-icon");
             icon_fallback.set_visible(false);
             vbox.append(&icon_fallback);
 
@@ -716,8 +833,9 @@ impl FileListView {
         let cmd_tx = command_tx.clone();
         let sel = selection.clone();
         let state_for_activate = state.clone();
+        let pane_for_activate = pane.clone();
         grid_view.connect_activate(move |_, pos| {
-            activate_entry(&sel, pos, &state_for_activate, &cmd_tx, pane_id);
+            activate_entry(&sel, pos, &state_for_activate, &cmd_tx, pane_for_activate());
         });
 
         // Drop target
@@ -728,8 +846,9 @@ impl FileListView {
             );
             let cmd_tx = command_tx.clone();
             let state_for_drop = state.clone();
+            let pane_for_drop = pane.clone();
             drop_target.connect_drop(move |_target, value, _x, _y| {
-                handle_file_drop(value, &state_for_drop, &cmd_tx)
+                handle_file_drop(value, &state_for_drop, &cmd_tx, pane_for_drop())
             });
             grid_view.add_controller(drop_target);
         }
@@ -737,13 +856,36 @@ impl FileListView {
         grid_view
     }
 
-    pub fn set_entries(&self, entries: &[FileEntry], show_hidden: bool) {
+    pub fn set_entries(
+        &self,
+        entries: &[FileEntry],
+        show_hidden: bool,
+        vcs_statuses: &HashMap<String, GitFileStatus>,
+    ) {
         self.model.remove_all();
         for entry in entries {
             if !show_hidden && entry.is_hidden() {
                 continue;
             }
-            self.model.append(&FileEntryObject::new(entry));
+            let obj = FileEntryObject::new(entry);
+            obj.set_vcs(vcs_statuses.get(&entry.name).copied());
+            self.model.append(&obj);
+        }
+    }
+
+    /// Repaint the version-control column from `vcs_statuses`, by file name.
+    /// Rows the map does not name are cleared.
+    pub fn apply_vcs_statuses(&self, vcs_statuses: &HashMap<String, GitFileStatus>) {
+        for i in 0..self.model.n_items() {
+            let Some(obj) = self
+                .model
+                .item(i)
+                .and_then(|o| o.downcast::<FileEntryObject>().ok())
+            else {
+                continue;
+            };
+            let status = vcs_statuses.get(obj.name().as_str()).copied();
+            obj.set_vcs(status);
         }
     }
 
@@ -859,6 +1001,7 @@ fn handle_file_drop(
     value: &glib::Value,
     state: &AppState,
     cmd_tx: &tokio::sync::mpsc::UnboundedSender<AppCommand>,
+    pane_id: u32,
 ) -> bool {
     if let Ok(uri_list) = value.get::<String>() {
         let sources: Vec<RavenPath> = uri_list
@@ -875,10 +1018,19 @@ fn handle_file_drop(
             return false;
         }
 
+        // The drop lands in the pane it was dropped on, which in dual-pane
+        // mode need not be the active one.
         let destination = {
             let s = state.borrow();
-            s.active_tab().active_pane().current_path.clone()
+            s.pane_by_id(pane_id)
+                .map(|p| p.current_path.clone())
+                .unwrap_or_else(|| s.active_tab().active_pane().current_path.clone())
         };
+        // Dropping onto the directory the files already live in is a no-op,
+        // not a move onto themselves.
+        if sources.iter().any(|src| src.parent().as_ref() == Some(&destination)) {
+            return false;
+        }
 
         let _ = cmd_tx.send(AppCommand::MoveFiles {
             sources,

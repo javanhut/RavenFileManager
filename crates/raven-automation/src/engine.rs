@@ -30,10 +30,17 @@ impl AutomationEngine {
         }
     }
 
-    /// Add a rule to the engine.
+    /// Add a rule to the engine, replacing one with the same id. While the
+    /// engine is running an enabled rule starts watching right away.
     pub fn add_rule(&mut self, rule: AutomationRule) {
         info!(rule_id = %rule.id, name = %rule.name, "adding automation rule");
-        self.rules.push(rule);
+        if self.rules.iter().any(|r| r.id == rule.id) {
+            self.remove_rule(&rule.id);
+        }
+        self.rules.push(rule.clone());
+        if self.running && rule.enabled {
+            self.activate(&rule);
+        }
     }
 
     /// Remove a rule by ID. Returns `true` if the rule was found and removed.
@@ -55,12 +62,37 @@ impl AutomationEngine {
 
     /// Enable or disable a rule. Returns `true` if the rule was found.
     pub fn set_rule_enabled(&mut self, rule_id: &str, enabled: bool) -> bool {
-        if let Some(rule) = self.rules.iter_mut().find(|r| r.id == rule_id) {
-            rule.enabled = enabled;
-            info!(rule_id, enabled, "set automation rule enabled state");
-            true
-        } else {
-            false
+        let Some(rule) = self.rules.iter_mut().find(|r| r.id == rule_id) else {
+            return false;
+        };
+        rule.enabled = enabled;
+        let rule = rule.clone();
+        info!(rule_id, enabled, "set automation rule enabled state");
+        if self.running {
+            if enabled {
+                if !self.watcher_handles.contains_key(rule_id) {
+                    self.activate(&rule);
+                }
+            } else if let Some(handle) = self.watcher_handles.remove(rule_id) {
+                handle.abort();
+            }
+        }
+        true
+    }
+
+    /// Start whatever a rule's trigger needs: a watcher, a schedule, or
+    /// nothing for a manual rule.
+    fn activate(&mut self, rule: &AutomationRule) {
+        match &rule.trigger {
+            Trigger::FileCreated | Trigger::FileModified | Trigger::FileDeleted => {
+                self.start_watcher(rule);
+            }
+            Trigger::Schedule { cron } => {
+                self.start_scheduler(rule, cron);
+            }
+            Trigger::Manual => {
+                info!(rule_id = %rule.id, "manual rule registered, awaiting trigger");
+            }
         }
     }
 
@@ -78,21 +110,8 @@ impl AutomationEngine {
         let rules: Vec<AutomationRule> = self.rules.clone();
 
         for rule in &rules {
-            if !rule.enabled {
-                continue;
-            }
-
-            match &rule.trigger {
-                Trigger::FileCreated | Trigger::FileModified | Trigger::FileDeleted => {
-                    self.start_watcher(rule);
-                }
-                Trigger::Schedule { cron } => {
-                    self.start_scheduler(rule, cron);
-                }
-                Trigger::Manual => {
-                    // Manual rules are only triggered via trigger_rule()
-                    info!(rule_id = %rule.id, "manual rule registered, awaiting trigger");
-                }
+            if rule.enabled {
+                self.activate(rule);
             }
         }
     }
@@ -246,6 +265,12 @@ async fn run_watcher(
                 continue;
             }
 
+            // A create or modify event arrives while the writer may still be
+            // going; acting then would copy or move a half-written file.
+            if !matches!(trigger, Trigger::FileDeleted) {
+                wait_until_settled(event_path).await;
+            }
+
             let matches = evaluate_conditions(
                 &rule.conditions,
                 &rule.condition_mode,
@@ -292,6 +317,37 @@ async fn run_watcher(
     }
 
     Ok(())
+}
+
+/// How often a fresh file is re-checked, and for how long at most.
+const SETTLE_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+const SETTLE_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Wait until the file's size and modification time have held still across
+/// two checks, or give up after [`SETTLE_LIMIT`]. A file that vanishes
+/// meanwhile returns at once; the caller's checks will find it gone.
+pub async fn wait_until_settled(path: &std::path::Path) {
+    let snapshot = |m: &std::fs::Metadata| (m.len(), m.modified().ok());
+    let started = tokio::time::Instant::now();
+    let mut last = match tokio::fs::metadata(path).await {
+        Ok(m) => snapshot(&m),
+        Err(_) => return,
+    };
+    loop {
+        tokio::time::sleep(SETTLE_POLL).await;
+        let current = match tokio::fs::metadata(path).await {
+            Ok(m) => snapshot(&m),
+            Err(_) => return,
+        };
+        if current == last {
+            return;
+        }
+        if started.elapsed() > SETTLE_LIMIT {
+            warn!(path = %path.display(), "file still changing after settle limit; acting anyway");
+            return;
+        }
+        last = current;
+    }
 }
 
 /// Scan watch paths for a rule and process all matching files.
@@ -379,6 +435,39 @@ async fn process_rule_on_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn settles_only_after_the_writer_stops() {
+        let dir = std::env::temp_dir().join(format!("raven_settle_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("growing.bin");
+        std::fs::write(&file, b"").unwrap();
+
+        // Grow the file for a while, well past a single poll interval.
+        let writer = {
+            let file = file.clone();
+            tokio::spawn(async move {
+                for _ in 0..4 {
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    let mut f = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+                    use std::io::Write;
+                    f.write_all(&[0u8; 4096]).unwrap();
+                }
+            })
+        };
+
+        wait_until_settled(&file).await;
+        let size_when_settled = std::fs::metadata(&file).unwrap().len();
+        writer.await.unwrap();
+        assert_eq!(size_when_settled, 4 * 4096, "acted before the writer finished");
+
+        // A missing file returns immediately rather than waiting the limit.
+        let started = std::time::Instant::now();
+        wait_until_settled(&dir.join("nope")).await;
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use std::path::PathBuf;
 
     use raven_core::automation_types::*;

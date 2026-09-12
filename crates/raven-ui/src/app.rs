@@ -33,10 +33,9 @@ struct Session {
 impl Session {
     /// The window, created on first use and returned as-is after that.
     ///
-    /// GApplication routes a second launch of the app into the process that is
-    /// already running, so opening a folder from the desktop and revealing a
-    /// file over D-Bus both arrive here and reuse the open window instead of
-    /// starting another copy of the file manager.
+    /// Each process has one window: with `NON_UNIQUE` a second launch is a
+    /// second process, so this only guards `activate` and `open` both firing
+    /// in the same one.
     fn window(&self, app: &adw::Application) -> Rc<RavenWindow> {
         if let Some(window) = self.window.borrow().as_ref() {
             return window.clone();
@@ -45,9 +44,13 @@ impl Session {
         // CSS needs a display, which exists only once the app is running.
         if !*self.theme_loaded.borrow() {
             *self.theme_loaded.borrow_mut() = true;
-            let theme = self.state.borrow().config.appearance.theme;
+            let (theme, font_size, icon_size) = {
+                let appearance = &self.state.borrow().config.appearance;
+                (appearance.theme, appearance.font_size, appearance.icon_size)
+            };
             themes::load_base_css();
             themes::apply_theme(theme);
+            themes::apply_sizes(font_size, icon_size);
         }
 
         let window = Rc::new(RavenWindow::new(
@@ -148,7 +151,11 @@ impl RavenApplication {
         // that named a folder failed, which is most of the ways one gets here.
         let app = adw::Application::builder()
             .application_id(APP_ID)
-            .flags(gio::ApplicationFlags::HANDLES_OPEN)
+            // `NON_UNIQUE` on top: each launch is its own process and window,
+            // so a second file manager can be opened beside the first. A
+            // folder handed over on the command line still opens, in the new
+            // window, through `HANDLES_OPEN`.
+            .flags(gio::ApplicationFlags::HANDLES_OPEN | gio::ApplicationFlags::NON_UNIQUE)
             .build();
 
         let config = AppConfig::load();

@@ -3,6 +3,7 @@ pub mod automation_types;
 pub mod commands;
 pub mod dir_size_cache;
 pub mod config;
+pub mod custom_actions;
 pub mod entry;
 pub mod error;
 pub mod events;

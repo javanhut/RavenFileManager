@@ -16,7 +16,7 @@ use raven_core::config::AppConfig;
 use raven_core::dir_size_cache::DirSizeCache;
 use raven_core::entry::FileEntry;
 use raven_core::events::AppEvent;
-use raven_core::operations::{Operation, OperationId, OperationKind};
+use raven_core::operations::{ConflictStrategy, Operation, OperationId, OperationKind};
 use raven_core::path::RavenPath;
 use raven_core::sort::SortSpec;
 use raven_core::vfs::VirtualFileSystem;
@@ -24,7 +24,7 @@ use raven_dbus::service::DbusService;
 use raven_ops::executor::{OperationExecutor, ProgressReporter};
 use raven_ops::queue::OperationQueue;
 use raven_ops::undo::UndoStack;
-use raven_plugin::api::MockPluginApi;
+use raven_plugin::api::ChannelPluginApi;
 use raven_plugin::manager::PluginManager;
 use raven_preview::router::PreviewRouter;
 use raven_search::content::{ContentSearchConfig, ContentSearcher};
@@ -75,10 +75,21 @@ fn main() -> glib::ExitCode {
             let vfs: Arc<dyn VirtualFileSystem> = vfs_router.clone();
             let queue = Arc::new(OperationQueue::new());
             let undo_stack = Arc::new(UndoStack::new());
-            let executor = Arc::new(
-                OperationExecutor::new(queue.clone(), undo_stack.clone())
-                    .expect("Failed to create operation executor"),
-            );
+            let mut executor = OperationExecutor::new(queue.clone(), undo_stack.clone())
+                .expect("Failed to create operation executor");
+            match config.operations.default_conflict_strategy.parse::<ConflictStrategy>() {
+                Ok(strategy) => executor.conflict_resolver_mut().set_default_strategy(strategy),
+                Err(e) => tracing::warn!("{}; conflicts will ask", e),
+            }
+            {
+                // A conflict the strategy leaves undecided goes to the window,
+                // which answers with ResolveConflict.
+                let event_tx = event_tx.clone();
+                executor.set_conflict_prompt(Arc::new(move |conflict| {
+                    let _ = event_tx.send(AppEvent::OperationConflict { conflict });
+                }));
+            }
+            let executor = Arc::new(executor);
             let preview_router = Arc::new(PreviewRouter::new());
             let next_op_id = Arc::new(std::sync::atomic::AtomicU64::new(1));
 
@@ -198,18 +209,36 @@ fn main() -> glib::ExitCode {
             for dir in PluginManager::default_plugin_dirs() {
                 plugin_manager.add_plugin_dir(dir);
             }
+            let plugin_api: Arc<dyn raven_plugin::api::PluginApi> = Arc::new(ChannelPluginApi::new(
+                command_tx_for_backend.clone(),
+                event_tx.clone(),
+                current_pane_id.clone(),
+                AppConfig::config_dir(),
+            ));
             // Auto-load enabled plugins
-            let discovered = plugin_manager.discover();
-            let plugin_api = Arc::new(MockPluginApi::new());
-            for (dir, manifest) in &discovered {
-                if config.plugins.enabled_plugins.contains(&manifest.id)
-                    || config.plugins.enabled_plugins.is_empty()
-                {
-                    match plugin_manager.load_plugin(dir, plugin_api.clone()) {
-                        Ok(id) => tracing::info!("Loaded plugin: {}", id),
-                        Err(e) => tracing::warn!("Failed to load plugin from {:?}: {}", dir, e),
+            if config.plugins.enabled {
+                let discovered = plugin_manager.discover();
+                for (dir, manifest) in &discovered {
+                    if config.plugins.is_plugin_enabled(&manifest.id) {
+                        match plugin_manager.load_plugin(dir, plugin_api.clone()) {
+                            Ok(id) => tracing::info!("Loaded plugin: {}", id),
+                            Err(e) => tracing::warn!("Failed to load plugin from {:?}: {}", dir, e),
+                        }
                     }
                 }
+            } else {
+                tracing::info!("Plugins are disabled in the configuration");
+            }
+            // Hooks run the plugin's script and wait for it, so they go
+            // through a blocking task rather than the command loop.
+            let plugin_manager = Arc::new(std::sync::Mutex::new(plugin_manager));
+            {
+                let plugin_manager = plugin_manager.clone();
+                tokio::task::spawn_blocking(move || {
+                    if let Ok(manager) = plugin_manager.lock() {
+                        manager.broadcast_event("on_startup", &[]);
+                    }
+                });
             }
 
             // --- DBus service ---
@@ -231,14 +260,23 @@ fn main() -> glib::ExitCode {
             // name next. It lives as long as the command loop below.
             let _fm1_connection = if config.dbus.enabled && config.dbus.file_manager1 {
                 match raven_dbus::fm1::serve(command_tx_for_backend.clone(), 0).await {
-                    Ok(connection) => {
+                    Ok((connection, true)) => {
                         tracing::info!("Serving {}", raven_dbus::fm1::FM1_BUS_NAME);
                         Some(connection)
                     }
+                    Ok((connection, false)) => {
+                        // Another window owns the name; this one takes over
+                        // when that window closes.
+                        tracing::info!(
+                            "Queued for {} behind another window",
+                            raven_dbus::fm1::FM1_BUS_NAME
+                        );
+                        Some(connection)
+                    }
                     Err(e) => {
-                        // Another file manager holding the name is the usual
-                        // cause and is not a failure worth stopping for; the
-                        // app simply does not receive reveal requests.
+                        // The bus is unreachable or refused us. Not a failure
+                        // worth stopping for; the app simply does not receive
+                        // reveal requests.
                         tracing::warn!(
                             "Could not serve {}: {}",
                             raven_dbus::fm1::FM1_BUS_NAME,
@@ -294,6 +332,8 @@ fn main() -> glib::ExitCode {
                 let current_pane_id = current_pane_id.clone();
                 let fs_watcher = fs_watcher.clone();
                 let watched_path = watched_path.clone();
+                let plugin_manager = plugin_manager.clone();
+                let plugin_api = plugin_api.clone();
 
                 match command {
                     // --- Navigation (cache-first) ---
@@ -321,6 +361,7 @@ fn main() -> glib::ExitCode {
                         }
 
                         let cache = dir_size_cache.clone();
+                        let status_path = path.clone();
                         tokio::spawn(async move {
                             tracing::info!("Navigating to: {}", path);
                             match vfs.list_dir(&path).await {
@@ -353,6 +394,31 @@ fn main() -> glib::ExitCode {
                                         pane_id,
                                         counts: tag_counts,
                                     });
+
+                                    // Version-control status for the listing. Sent even
+                                    // when empty, so a clean directory clears the marks
+                                    // the previous one left.
+                                    if let Some(local) = status_path.as_local_path().cloned() {
+                                        let event_tx = event_tx.clone();
+                                        let path = status_path.clone();
+                                        tokio::task::spawn_blocking(move || {
+                                            let statuses = raven_git::status_for_dir(&local);
+                                            let _ = event_tx.send(AppEvent::GitStatusUpdated {
+                                                path,
+                                                statuses,
+                                            });
+                                        });
+                                    }
+
+                                    // Plugins hear about the change after the listing is up.
+                                    if let Some(local) = status_path.as_local_path() {
+                                        let shown = local.to_string_lossy().to_string();
+                                        tokio::task::spawn_blocking(move || {
+                                            if let Ok(manager) = plugin_manager.lock() {
+                                                manager.broadcast_event("on_directory_changed", &[&shown]);
+                                            }
+                                        });
+                                    }
 
                                     // Phase 1 + 2: cache-first with background validation
                                     for dir_path in dir_paths {
@@ -1110,20 +1176,15 @@ fn main() -> glib::ExitCode {
 
                     // --- Git ---
                     AppCommand::RefreshGitStatus { path } => {
-                        tokio::spawn(async move {
-                            if let Some(local_path) = path.as_local_path() {
-                                let statuses =
-                                    raven_git::status::GitStatusProvider::get_status_entries(
-                                        local_path,
-                                    );
-                                if !statuses.is_empty() {
-                                    let _ = event_tx.send(AppEvent::GitStatusUpdated {
-                                        path,
-                                        statuses,
-                                    });
-                                }
-                            }
-                        });
+                        if let Some(local) = path.as_local_path().cloned() {
+                            tokio::task::spawn_blocking(move || {
+                                let statuses = raven_git::status_for_dir(&local);
+                                let _ = event_tx.send(AppEvent::GitStatusUpdated {
+                                    path,
+                                    statuses,
+                                });
+                            });
+                        }
                     }
 
                     // --- Refresh ---
@@ -1169,7 +1230,15 @@ fn main() -> glib::ExitCode {
                     | AppCommand::NavigateUp { .. } => {}
 
                     AppCommand::ResolveConflict { id, strategy } => {
-                        tracing::debug!("Conflict resolution: {:?} for {:?}", strategy, id);
+                        tokio::spawn(async move {
+                            if !executor.resolve_pending(id, strategy).await {
+                                tracing::debug!(
+                                    "no conflict waiting on {:?} for {:?}",
+                                    id,
+                                    strategy
+                                );
+                            }
+                        });
                     }
 
                     // --- Automation ---
@@ -1211,28 +1280,37 @@ fn main() -> glib::ExitCode {
 
                     // --- Plugins ---
                     AppCommand::LoadPlugin { path } => {
-                        let api = Arc::new(MockPluginApi::new());
-                        match plugin_manager.load_plugin(&path, api) {
-                            Ok(id) => tracing::info!("Loaded plugin: {}", id),
-                            Err(e) => {
-                                let _ = event_tx.send(AppEvent::PluginError {
-                                    plugin_id: path.display().to_string(),
-                                    error: e,
-                                });
+                        tokio::task::spawn_blocking(move || {
+                            let Ok(mut manager) = plugin_manager.lock() else {
+                                return;
+                            };
+                            match manager.load_plugin(&path, plugin_api) {
+                                Ok(id) => tracing::info!("Loaded plugin: {}", id),
+                                Err(e) => {
+                                    let _ = event_tx.send(AppEvent::PluginError {
+                                        plugin_id: path.display().to_string(),
+                                        error: e,
+                                    });
+                                }
                             }
-                        }
+                        });
                     }
 
                     AppCommand::UnloadPlugin { plugin_id } => {
-                        match plugin_manager.unload_plugin(&plugin_id) {
-                            Ok(()) => tracing::info!("Unloaded plugin: {}", plugin_id),
-                            Err(e) => {
-                                let _ = event_tx.send(AppEvent::PluginError {
-                                    plugin_id,
-                                    error: e,
-                                });
+                        tokio::task::spawn_blocking(move || {
+                            let Ok(mut manager) = plugin_manager.lock() else {
+                                return;
+                            };
+                            match manager.unload_plugin(&plugin_id) {
+                                Ok(()) => tracing::info!("Unloaded plugin: {}", plugin_id),
+                                Err(e) => {
+                                    let _ = event_tx.send(AppEvent::PluginError {
+                                        plugin_id,
+                                        error: e,
+                                    });
+                                }
                             }
-                        }
+                        });
                     }
 
                     // --- Network connections ---
@@ -1241,15 +1319,36 @@ fn main() -> glib::ExitCode {
                         port,
                         user,
                         auth,
+                        remote_path,
                     } => {
                         let host_clone = host.clone();
                         tokio::spawn(async move {
                             match vfs_router.connect_sftp(host.clone(), port, user.clone(), &auth).await {
                                 Ok(key) => {
+                                    // The folder to open: the one asked for, else the
+                                    // login directory, else the root if the server
+                                    // cannot resolve either.
+                                    let remote = remote_path
+                                        .as_deref()
+                                        .filter(|p| !p.trim().is_empty())
+                                        .unwrap_or(".");
+                                    let resolved = match vfs_router.sftp_canonicalize(&key, remote).await {
+                                        Ok(p) => p,
+                                        Err(e) => {
+                                            tracing::warn!("SFTP could not resolve {}: {}", remote, e);
+                                            "/".to_string()
+                                        }
+                                    };
                                     let _ = event_tx.send(AppEvent::RemoteConnected {
                                         id: key,
                                         protocol: "sftp".to_string(),
-                                        host: host_clone,
+                                        host: host_clone.clone(),
+                                        initial_path: RavenPath::Sftp {
+                                            host: host_clone,
+                                            port,
+                                            user,
+                                            path: resolved,
+                                        },
                                     });
                                 }
                                 Err(e) => {

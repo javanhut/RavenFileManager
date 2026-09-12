@@ -112,6 +112,8 @@ pub enum AppEvent {
         id: String,
         protocol: String,
         host: String,
+        /// Where to start browsing the connection.
+        initial_path: RavenPath,
     },
     RemoteDisconnected {
         id: String,

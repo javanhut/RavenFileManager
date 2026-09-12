@@ -213,6 +213,20 @@ impl SftpFs {
         }
     }
 
+    /// Resolve a remote path the way the server sees it: absolute, with
+    /// `.` and `..` folded away. `.` gives the login directory.
+    pub async fn canonicalize(&self, remote_path: &str) -> RavenResult<String> {
+        let guard = self.get_sftp().await?;
+        let inner = guard.as_ref().unwrap();
+        inner
+            .sftp
+            .canonicalize(remote_path)
+            .await
+            .map_err(|e| RavenError::Network {
+                message: format!("SFTP could not resolve {}: {}", remote_path, e),
+            })
+    }
+
     /// Return the connection identifier string for this SFTP connection.
     pub fn connection_key(&self) -> String {
         format!("{}@{}:{}", self.user, self.host, self.port)

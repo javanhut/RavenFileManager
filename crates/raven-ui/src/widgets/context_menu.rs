@@ -3,6 +3,7 @@ use gtk::prelude::*;
 use gtk4 as gtk;
 
 use raven_core::config::AppConfig;
+use raven_core::custom_actions::CustomAction;
 use raven_core::entry::FileEntry;
 
 use crate::file_opener;
@@ -13,6 +14,8 @@ pub struct FileContextMenu {
     menu: gio::Menu,
     open_with_section: gio::Menu,
     tag_section: gio::Menu,
+    /// Custom actions from actions.toml, rebuilt for each selection.
+    actions_section: gio::Menu,
 }
 
 impl FileContextMenu {
@@ -38,6 +41,12 @@ impl FileContextMenu {
         edit_section.append(Some("Rename"), Some("file.rename"));
         menu.append_section(None, &edit_section);
 
+        // New items are created in the directory being shown, whatever is selected.
+        let new_section = gio::Menu::new();
+        new_section.append(Some("New Folder..."), Some("file.new_folder"));
+        new_section.append(Some("New File..."), Some("file.new_file"));
+        menu.append_section(None, &new_section);
+
         // Sidebar section (for directories)
         let sidebar_section = gio::Menu::new();
         sidebar_section.append(Some("Pin to Sidebar"), Some("file.pin_to_sidebar"));
@@ -56,6 +65,10 @@ impl FileContextMenu {
             Some("file.suggest_organization"),
         );
         menu.append_section(None, &ai_section);
+
+        // Custom actions (dynamically populated; an empty section shows nothing)
+        let actions_section = gio::Menu::new();
+        menu.append_section(None, &actions_section);
 
         // Destructive section
         let delete_section = gio::Menu::new();
@@ -76,6 +89,27 @@ impl FileContextMenu {
             menu,
             open_with_section,
             tag_section,
+            actions_section,
+        }
+    }
+
+    /// Offer the custom actions that apply to `selected`. Each item carries the
+    /// action's index so the window can look it up when activated.
+    pub fn update_custom_actions(&self, actions: &[CustomAction], selected: &[FileEntry]) {
+        self.actions_section.remove_all();
+        for (i, action) in actions.iter().enumerate() {
+            if !action.applies_to(selected) {
+                continue;
+            }
+            let item = gio::MenuItem::new(Some(&action.name), None);
+            item.set_action_and_target_value(
+                Some("file.custom-action"),
+                Some(&(i as i32).to_variant()),
+            );
+            if let Some(icon) = &action.icon {
+                item.set_attribute_value("icon", Some(&icon.to_variant()));
+            }
+            self.actions_section.append_item(&item);
         }
     }
 

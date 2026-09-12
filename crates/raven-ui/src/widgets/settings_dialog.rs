@@ -6,6 +6,7 @@ use gtk::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 
+use raven_core::commands::AppCommand;
 use raven_core::config::{AppConfig, FileAssociation, Keybinding, Theme, ViewMode};
 
 use crate::state::AppState;
@@ -17,7 +18,11 @@ pub struct SettingsDialog {
 }
 
 impl SettingsDialog {
-    pub fn new(parent: &adw::ApplicationWindow, state: AppState) -> Self {
+    pub fn new(
+        parent: &adw::ApplicationWindow,
+        state: AppState,
+        command_tx: tokio::sync::mpsc::UnboundedSender<AppCommand>,
+    ) -> Self {
         let window = adw::Window::builder()
             .title("Settings")
             .default_width(700)
@@ -68,6 +73,25 @@ impl SettingsDialog {
             &Self::build_tags_page(state.clone()),
             Some("tags"),
             "Tags",
+        );
+        stack.add_titled(
+            &crate::widgets::settings_actions::build_actions_page(state.clone()),
+            Some("actions"),
+            "Actions",
+        );
+        stack.add_titled(
+            &crate::widgets::settings_automation::build_automation_page(
+                &window,
+                state.clone(),
+                command_tx.clone(),
+            ),
+            Some("automation"),
+            "Automation",
+        );
+        stack.add_titled(
+            &crate::widgets::settings_plugins::build_plugins_page(state.clone(), command_tx),
+            Some("plugins"),
+            "Plugins",
         );
 
         let content_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -315,6 +339,7 @@ impl SettingsDialog {
             icon_row.connect_value_notify(move |row| {
                 let mut s = state.borrow_mut();
                 s.config.appearance.icon_size = row.value() as u32;
+                themes::apply_sizes(s.config.appearance.font_size, s.config.appearance.icon_size);
                 let _ = s.config.save();
             });
         }
@@ -338,6 +363,7 @@ impl SettingsDialog {
             font_row.connect_value_notify(move |row| {
                 let mut s = state.borrow_mut();
                 s.config.appearance.font_size = row.value() as u32;
+                themes::apply_sizes(s.config.appearance.font_size, s.config.appearance.icon_size);
                 let _ = s.config.save();
             });
         }

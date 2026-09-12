@@ -1,11 +1,14 @@
 [Desktop Entry]
+Type=Application
 Name=Raven File Manager
+GenericName=File Manager
 Comment=Fast, powerful, and extensible file manager
 Exec=ravenfilemanager %U
 Icon=com.ravenfilemanager.Raven
 Terminal=false
-Type=Application
 Categories=System;FileTools;FileManager;GTK;
 MimeType=inode/directory;
 Keywords=Files;Folders;Explorer;Browser;Manager;
 StartupNotify=true
+StartupWMClass=com.ravenfilemanager.Raven
+DBusActivatable=false

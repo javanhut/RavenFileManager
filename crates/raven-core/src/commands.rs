@@ -148,6 +148,8 @@ pub enum AppCommand {
         port: u16,
         user: String,
         auth: SshAuth,
+        /// Folder to open once connected; the login directory when `None`.
+        remote_path: Option<String>,
     },
     ConnectSmb {
         host: String,

@@ -1,40 +1,143 @@
-# Raven File Manager keybindings
-# Format: action = "key combo"
+# Raven File Manager keyboard shortcuts
+#
+# Shortcuts live in the [keybindings] section of config.toml
+# (~/.config/raven/config.toml) and are edited in Settings > Keybindings.
+# This file lists every action and its default, in the format config.toml uses.
+# Key names are GDK key names (Left, F2, Delete, Page_Down, comma, space, a);
+# modifiers are Ctrl, Alt, Shift and Super. Actions missing from a config get
+# their default automatically.
 
-[navigation]
-back = "Alt+Left"
-forward = "Alt+Right"
-up = "Alt+Up"
-home = "Alt+Home"
-refresh = "Ctrl+R"
-edit_path = "Ctrl+L"
+[[bindings]]
+action = "navigate_back"
+key = "Left"
+modifiers = ["Alt"]
 
-[view]
-toggle_hidden = "Ctrl+H"
-toggle_preview = "Space"
-zoom_in = "Ctrl+plus"
-zoom_out = "Ctrl+minus"
-zoom_reset = "Ctrl+0"
+[[bindings]]
+action = "navigate_forward"
+key = "Right"
+modifiers = ["Alt"]
 
-[tabs]
-new_tab = "Ctrl+T"
-close_tab = "Ctrl+W"
-next_tab = "Ctrl+Tab"
-prev_tab = "Ctrl+Shift+Tab"
-dual_pane = "F3"
+[[bindings]]
+action = "navigate_up"
+key = "Up"
+modifiers = ["Alt"]
 
-[files]
-copy = "Ctrl+C"
-cut = "Ctrl+X"
-paste = "Ctrl+V"
-delete = "Delete"
-trash = "Ctrl+Delete"
-rename = "F2"
-new_folder = "Ctrl+Shift+N"
-new_file = "Ctrl+N"
-select_all = "Ctrl+A"
-undo = "Ctrl+Z"
+[[bindings]]
+action = "navigate_home"
+key = "Home"
+modifiers = ["Alt"]
 
-[search]
-search = "Ctrl+F"
-filter = "/"
+[[bindings]]
+action = "refresh"
+key = "r"
+modifiers = ["Ctrl"]
+
+[[bindings]]
+action = "edit_path"
+key = "l"
+modifiers = ["Ctrl"]
+
+[[bindings]]
+action = "toggle_hidden"
+key = "h"
+modifiers = ["Ctrl"]
+
+[[bindings]]
+action = "toggle_search"
+key = "f"
+modifiers = ["Ctrl"]
+
+[[bindings]]
+action = "toggle_preview"
+key = "space"
+modifiers = []
+
+[[bindings]]
+action = "new_tab"
+key = "t"
+modifiers = ["Ctrl"]
+
+[[bindings]]
+action = "close_tab"
+key = "w"
+modifiers = ["Ctrl"]
+
+[[bindings]]
+action = "next_tab"
+key = "Page_Down"
+modifiers = ["Ctrl"]
+
+[[bindings]]
+action = "prev_tab"
+key = "Page_Up"
+modifiers = ["Ctrl"]
+
+[[bindings]]
+action = "toggle_dual_pane"
+key = "F3"
+modifiers = []
+
+[[bindings]]
+action = "switch_pane"
+key = "F6"
+modifiers = []
+
+[[bindings]]
+action = "copy"
+key = "c"
+modifiers = ["Ctrl"]
+
+[[bindings]]
+action = "cut"
+key = "x"
+modifiers = ["Ctrl"]
+
+[[bindings]]
+action = "paste"
+key = "v"
+modifiers = ["Ctrl"]
+
+[[bindings]]
+action = "trash"
+key = "Delete"
+modifiers = []
+
+[[bindings]]
+action = "delete_permanently"
+key = "Delete"
+modifiers = ["Shift"]
+
+[[bindings]]
+action = "rename"
+key = "F2"
+modifiers = []
+
+[[bindings]]
+action = "new_folder"
+key = "n"
+modifiers = ["Ctrl", "Shift"]
+
+[[bindings]]
+action = "new_file"
+key = "n"
+modifiers = ["Ctrl", "Alt"]
+
+[[bindings]]
+action = "select_all"
+key = "a"
+modifiers = ["Ctrl"]
+
+[[bindings]]
+action = "undo"
+key = "z"
+modifiers = ["Ctrl"]
+
+[[bindings]]
+action = "properties"
+key = "i"
+modifiers = ["Ctrl"]
+
+[[bindings]]
+action = "open_settings"
+key = "comma"
+modifiers = ["Ctrl"]

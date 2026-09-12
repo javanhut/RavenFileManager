@@ -8,6 +8,8 @@ use gtk::prelude::*;
 use raven_core::commands::AppCommand;
 use raven_core::path::RavenPath;
 
+use crate::state::PaneResolver;
+
 /// A path bar that shows breadcrumb buttons or an editable text entry (toggled with Ctrl+L).
 pub struct PathBar {
     pub container: gtk::Box,
@@ -19,7 +21,7 @@ pub struct PathBar {
 impl PathBar {
     pub fn new(
         command_tx: tokio::sync::mpsc::UnboundedSender<AppCommand>,
-        pane_id: u32,
+        pane: PaneResolver,
     ) -> Self {
         let container = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         container.add_css_class("path-bar");
@@ -50,7 +52,7 @@ impl PathBar {
                 let path = RavenPath::local(PathBuf::from(&text));
                 let _ = cmd_tx.send(AppCommand::Navigate {
                     path,
-                    pane_id,
+                    pane_id: pane(),
                 });
             }
             // Switch back to breadcrumb mode

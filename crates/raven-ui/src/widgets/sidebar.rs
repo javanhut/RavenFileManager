@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -9,7 +10,7 @@ use raven_core::commands::AppCommand;
 use raven_core::config::Bookmark;
 use raven_core::path::RavenPath;
 
-use crate::state::AppState;
+use crate::state::{AppState, PaneResolver};
 use crate::widgets::file_list::format_size;
 
 /// Sidebar with bookmarks, mounted volumes, and tags.
@@ -20,17 +21,24 @@ pub struct Sidebar {
     volume_list: gtk::ListBox,
     volume_monitor: gio::VolumeMonitor,
     command_tx: tokio::sync::mpsc::UnboundedSender<AppCommand>,
-    pane_id: u32,
+    /// The pane sidebar clicks navigate: whichever one is active.
+    pane: PaneResolver,
     state: AppState,
     /// Tag currently filtering the pane, so a second click on the same row clears it.
     active_tag: Rc<RefCell<Option<String>>>,
+    /// Network section: one row per open remote connection, then the
+    /// "Connect to Server" row.
+    remote_list: gtk::ListBox,
+    remote_rows: RefCell<HashMap<String, gtk::ListBoxRow>>,
+    /// What "Connect to Server" does; the window supplies the dialog.
+    connect_handler: Rc<RefCell<Option<Box<dyn Fn()>>>>,
 }
 
 impl Sidebar {
     pub fn new(
         state: AppState,
         command_tx: tokio::sync::mpsc::UnboundedSender<AppCommand>,
-        pane_id: u32,
+        pane: PaneResolver,
     ) -> Self {
         let widget = gtk::Box::new(gtk::Orientation::Vertical, 0);
         widget.set_width_request(200);
@@ -55,7 +63,7 @@ impl Sidebar {
         };
 
         for bookmark in &bookmarks {
-            let row = Self::create_bookmark_row(bookmark, &command_tx, pane_id, &state);
+            let row = Self::create_bookmark_row(bookmark, &command_tx, &pane, &state);
             bookmarks_list.append(&row);
         }
 
@@ -79,6 +87,7 @@ impl Sidebar {
             let state_for_pin = state.clone();
             let bl_for_drop = bookmarks_list.clone();
             let cmd_for_pin = command_tx.clone();
+            let pane_for_pin = pane.clone();
             pin_drop_target.connect_drop(move |_target, value, _x, _y| {
                 if let Ok(uri_list) = value.get::<String>() {
                     let paths: Vec<PathBuf> = uri_list
@@ -115,7 +124,7 @@ impl Sidebar {
                                 let row = Self::create_bookmark_row(
                                     &bookmark,
                                     &cmd_for_pin,
-                                    pane_id,
+                                    &pane_for_pin,
                                     &state_for_pin,
                                 );
                                 bl_for_drop.append(&row);
@@ -158,12 +167,13 @@ impl Sidebar {
         )
         .join(".local/share/Trash/files");
         let cmd_tx_trash = command_tx.clone();
+        let pane_for_trash = pane.clone();
         let trash_gesture = gtk::GestureClick::new();
         trash_gesture.set_button(1);
         trash_gesture.connect_released(move |_, _, _, _| {
             let _ = cmd_tx_trash.send(AppCommand::Navigate {
                 path: RavenPath::local(trash_path.clone()),
-                pane_id,
+                pane_id: pane_for_trash(),
             });
         });
         trash_row.add_controller(trash_gesture);
@@ -191,9 +201,57 @@ impl Sidebar {
         let volume_monitor = gio::VolumeMonitor::get();
 
         // Populate volume list
-        Self::populate_volume_list(&volume_list, &volume_monitor, &command_tx, pane_id);
+        Self::populate_volume_list(&volume_list, &volume_monitor, &command_tx, &pane);
 
         widget.append(&volume_list);
+
+        // Separator before network
+        let sep_net = gtk::Separator::new(gtk::Orientation::Horizontal);
+        sep_net.set_margin_top(12);
+        sep_net.set_margin_bottom(12);
+        widget.append(&sep_net);
+
+        // Network section
+        let network_label = gtk::Label::new(Some("Network"));
+        network_label.set_halign(gtk::Align::Start);
+        network_label.add_css_class("heading");
+        network_label.set_margin_start(12);
+        network_label.set_margin_bottom(6);
+        widget.append(&network_label);
+
+        let remote_list = gtk::ListBox::new();
+        remote_list.set_selection_mode(gtk::SelectionMode::None);
+        remote_list.add_css_class("navigation-sidebar");
+
+        let connect_handler: Rc<RefCell<Option<Box<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+        {
+            let connect_hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            connect_hbox.set_margin_start(8);
+            connect_hbox.set_margin_end(8);
+            connect_hbox.set_margin_top(4);
+            connect_hbox.set_margin_bottom(4);
+            let icon = gtk::Image::from_icon_name("network-server-symbolic");
+            icon.set_pixel_size(16);
+            connect_hbox.append(&icon);
+            let lbl = gtk::Label::new(Some("Connect to Server..."));
+            lbl.set_halign(gtk::Align::Start);
+            connect_hbox.append(&lbl);
+            let connect_row = gtk::ListBoxRow::new();
+            connect_row.set_child(Some(&connect_hbox));
+            connect_row.set_activatable(true);
+
+            let handler = connect_handler.clone();
+            let gesture = gtk::GestureClick::new();
+            gesture.set_button(1);
+            gesture.connect_released(move |_, _, _, _| {
+                if let Some(cb) = handler.borrow().as_ref() {
+                    cb();
+                }
+            });
+            connect_row.add_controller(gesture);
+            remote_list.append(&connect_row);
+        }
+        widget.append(&remote_list);
 
         // Separator before tags
         let sep2 = gtk::Separator::new(gtk::Orientation::Horizontal);
@@ -221,9 +279,83 @@ impl Sidebar {
             volume_list,
             volume_monitor,
             command_tx,
-            pane_id,
+            pane,
             state,
             active_tag: Rc::new(RefCell::new(None)),
+            remote_list,
+            remote_rows: RefCell::new(HashMap::new()),
+            connect_handler,
+        }
+    }
+
+    /// Set what the "Connect to Server" row opens.
+    pub fn set_connect_handler(&self, cb: impl Fn() + 'static) {
+        *self.connect_handler.borrow_mut() = Some(Box::new(cb));
+    }
+
+    /// Show an open remote connection: clicking it browses `path`, the
+    /// eject button disconnects it.
+    pub fn add_remote(&self, id: &str, label: &str, path: &RavenPath) {
+        self.remove_remote(id);
+
+        let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        hbox.set_margin_start(4);
+        hbox.set_margin_end(4);
+
+        let open_btn = gtk::Button::new();
+        open_btn.add_css_class("flat");
+        open_btn.set_hexpand(true);
+        open_btn.set_tooltip_text(Some(&path.to_string()));
+        let open_content = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let icon = gtk::Image::from_icon_name("folder-remote-symbolic");
+        icon.set_pixel_size(16);
+        open_content.append(&icon);
+        let lbl = gtk::Label::new(Some(label));
+        lbl.set_halign(gtk::Align::Start);
+        lbl.set_hexpand(true);
+        lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        open_content.append(&lbl);
+        open_btn.set_child(Some(&open_content));
+        {
+            let cmd_tx = self.command_tx.clone();
+            let pane = self.pane.clone();
+            let path = path.clone();
+            open_btn.connect_clicked(move |_| {
+                let _ = cmd_tx.send(AppCommand::Navigate {
+                    path: path.clone(),
+                    pane_id: pane(),
+                });
+            });
+        }
+        hbox.append(&open_btn);
+
+        let eject_btn = gtk::Button::from_icon_name("media-eject-symbolic");
+        eject_btn.add_css_class("flat");
+        eject_btn.set_tooltip_text(Some("Disconnect"));
+        eject_btn.set_valign(gtk::Align::Center);
+        {
+            let cmd_tx = self.command_tx.clone();
+            let id = id.to_string();
+            eject_btn.connect_clicked(move |_| {
+                let _ = cmd_tx.send(AppCommand::DisconnectRemote { id: id.clone() });
+            });
+        }
+        hbox.append(&eject_btn);
+
+        let row = gtk::ListBoxRow::new();
+        row.set_child(Some(&hbox));
+        row.set_activatable(false);
+
+        // Connections go above the "Connect to Server" row, which stays last.
+        let position = self.remote_rows.borrow().len() as i32;
+        self.remote_list.insert(&row, position);
+        self.remote_rows.borrow_mut().insert(id.to_string(), row);
+    }
+
+    /// Drop the row for a connection that is gone.
+    pub fn remove_remote(&self, id: &str) {
+        if let Some(row) = self.remote_rows.borrow_mut().remove(id) {
+            self.remote_list.remove(&row);
         }
     }
 
@@ -232,14 +364,15 @@ impl Sidebar {
         let vl = self.volume_list.clone();
         let vm = self.volume_monitor.clone();
         let cmd_tx = self.command_tx.clone();
-        let pane_id = self.pane_id;
+        let pane = self.pane.clone();
 
         let refresh = {
             let vl = vl.clone();
             let vm = vm.clone();
             let cmd_tx = cmd_tx.clone();
+            let pane = pane.clone();
             move || {
-                Self::populate_volume_list(&vl, &vm, &cmd_tx, pane_id);
+                Self::populate_volume_list(&vl, &vm, &cmd_tx, &pane);
             }
         };
 
@@ -274,7 +407,7 @@ impl Sidebar {
         volume_list: &gtk::ListBox,
         volume_monitor: &gio::VolumeMonitor,
         command_tx: &tokio::sync::mpsc::UnboundedSender<AppCommand>,
-        pane_id: u32,
+        pane: &PaneResolver,
     ) {
         // Clear existing rows
         while let Some(child) = volume_list.first_child() {
@@ -282,7 +415,7 @@ impl Sidebar {
         }
 
         // Add filesystem root with disk space
-        let root_row = Self::create_device_row("Computer", "computer-symbolic", "/", command_tx, pane_id);
+        let root_row = Self::create_device_row("Computer", "computer-symbolic", "/", command_tx, pane);
         volume_list.append(&root_row);
 
         // Mounted volumes
@@ -306,7 +439,7 @@ impl Sidebar {
                     &icon_name,
                     &path_str,
                     command_tx,
-                    pane_id,
+                    pane,
                     &mount,
                 );
                 volume_list.append(&row);
@@ -330,7 +463,7 @@ impl Sidebar {
         icon_name: &str,
         path_str: &str,
         command_tx: &tokio::sync::mpsc::UnboundedSender<AppCommand>,
-        pane_id: u32,
+        pane: &PaneResolver,
     ) -> gtk::ListBoxRow {
         let vbox = gtk::Box::new(gtk::Orientation::Vertical, 2);
         vbox.set_margin_start(8);
@@ -382,13 +515,14 @@ impl Sidebar {
         row.set_child(Some(&vbox));
 
         let cmd_tx = command_tx.clone();
+        let pane = pane.clone();
         let target_path = path_str.to_string();
         let gesture = gtk::GestureClick::new();
         gesture.set_button(1);
         gesture.connect_released(move |_, _, _, _| {
             let _ = cmd_tx.send(AppCommand::Navigate {
                 path: RavenPath::local(PathBuf::from(&target_path)),
-                pane_id,
+                pane_id: pane(),
             });
         });
         row.add_controller(gesture);
@@ -402,10 +536,10 @@ impl Sidebar {
         icon_name: &str,
         path_str: &str,
         command_tx: &tokio::sync::mpsc::UnboundedSender<AppCommand>,
-        pane_id: u32,
+        pane: &PaneResolver,
         mount: &gio::Mount,
     ) -> gtk::ListBoxRow {
-        let row = Self::create_device_row(name, icon_name, path_str, command_tx, pane_id);
+        let row = Self::create_device_row(name, icon_name, path_str, command_tx, pane);
 
         // Right-click: unmount context menu
         let menu = gio::Menu::new();
@@ -553,7 +687,7 @@ impl Sidebar {
             // Click to filter by tag; clicking the active tag again clears the filter.
             let cmd_tx = self.command_tx.clone();
             let tag = tag_name.clone();
-            let pane_id = self.pane_id;
+            let pane = self.pane.clone();
             let state = self.state.clone();
             let active_tag = self.active_tag.clone();
             let tags_list = self.tags_list.clone();
@@ -561,6 +695,7 @@ impl Sidebar {
             let gesture = gtk::GestureClick::new();
             gesture.set_button(1);
             gesture.connect_released(move |_, _, _, _| {
+                let pane_id = pane();
                 let Some(path) = state
                     .borrow()
                     .pane_by_id(pane_id)
@@ -627,14 +762,14 @@ impl Sidebar {
         }
 
         // Add row to UI
-        let row = Self::create_bookmark_row(bookmark, &self.command_tx, self.pane_id, &self.state);
+        let row = Self::create_bookmark_row(bookmark, &self.command_tx, &self.pane, &self.state);
         self.bookmarks_list.append(&row);
     }
 
     fn create_bookmark_row(
         bookmark: &Bookmark,
         command_tx: &tokio::sync::mpsc::UnboundedSender<AppCommand>,
-        pane_id: u32,
+        pane: &PaneResolver,
         state: &AppState,
     ) -> gtk::ListBoxRow {
         let icon_name = bookmark
@@ -663,13 +798,14 @@ impl Sidebar {
 
         // Navigate on left-click
         let cmd_tx = command_tx.clone();
+        let pane = pane.clone();
         let target_path = bookmark.path.clone();
         let gesture = gtk::GestureClick::new();
         gesture.set_button(1);
         gesture.connect_released(move |_, _, _, _| {
             let _ = cmd_tx.send(AppCommand::Navigate {
                 path: RavenPath::local(PathBuf::from(&target_path)),
-                pane_id,
+                pane_id: pane(),
             });
         });
         row.add_controller(gesture);

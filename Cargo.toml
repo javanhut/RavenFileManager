@@ -38,6 +38,7 @@ raven-ui = { path = "crates/raven-ui" }
 
 # Core
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
