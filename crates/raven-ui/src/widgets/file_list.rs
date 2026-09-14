@@ -15,6 +15,7 @@ use raven_core::events::GitFileStatus;
 use raven_core::path::RavenPath;
 
 use crate::state::{AppState, PaneResolver};
+use crate::thumbnails::{self, Slot};
 
 // GObject wrapper for FileEntry to use with ColumnView/GridView
 mod imp {
@@ -327,7 +328,8 @@ impl FileListView {
 
         // Name column (icon + name)
         let name_factory = gtk::SignalListItemFactory::new();
-        name_factory.connect_setup(|_, item| {
+        let drag_selection = selection.clone();
+        name_factory.connect_setup(move |_, item| {
             let item = item.downcast_ref::<gtk::ListItem>().unwrap();
             let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
             let icon = gtk::Image::new();
@@ -338,26 +340,7 @@ impl FileListView {
             hbox.append(&icon);
             hbox.append(&label);
 
-            // DragSource for each row
-            let uri_cell: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
-            let drag_source = gtk::DragSource::new();
-            drag_source.set_actions(gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE);
-            let uri_for_prepare = uri_cell.clone();
-            drag_source.connect_prepare(move |_source, _x, _y| {
-                let uri = uri_for_prepare.borrow().clone();
-                if uri.is_empty() {
-                    return None;
-                }
-                Some(gtk::gdk::ContentProvider::for_value(&uri.to_value()))
-            });
-            hbox.add_controller(drag_source);
-
-            unsafe {
-                hbox.set_data("drag-uri-cell", uri_cell);
-                // Position cell updated in connect_bind so right-click can select the item.
-                let pos_cell: Rc<RefCell<u32>> = Rc::new(RefCell::new(u32::MAX));
-                hbox.set_data("item-pos", pos_cell);
-            }
+            attach_item_drag(&hbox, &drag_selection);
 
             item.set_child(Some(&hbox));
         });
@@ -375,6 +358,7 @@ impl FileListView {
             let icon = hbox.first_child().and_downcast::<gtk::Image>().unwrap();
             let label = icon.next_sibling().and_downcast::<gtk::Label>().unwrap();
             icon.set_icon_name(Some(&entry_obj.icon_name()));
+            show_thumbnail(&hbox, &icon, &entry_obj, thumbnails::LIST_SIZE);
             label.set_text(&entry_obj.name());
             if entry_obj.is_hidden() {
                 label.set_opacity(0.5);
@@ -383,17 +367,6 @@ impl FileListView {
             }
 
             if let Some(entry) = entry_obj.entry() {
-                let uri_cell: Option<std::ptr::NonNull<Rc<RefCell<String>>>> =
-                    unsafe { hbox.data::<Rc<RefCell<String>>>("drag-uri-cell") };
-                if let Some(ptr) = uri_cell {
-                    let cell = unsafe { ptr.as_ref() };
-                    if let Some(local) = entry.path.as_local_path() {
-                        *cell.borrow_mut() = format!("file://{}\r\n", local.display());
-                    } else {
-                        *cell.borrow_mut() = String::new();
-                    }
-                }
-
                 if entry.is_dir() {
                     if let Some(local) = entry.path.as_local_path() {
                         let tooltip = build_dir_preview_tooltip(local);
@@ -407,6 +380,7 @@ impl FileListView {
         name_factory.connect_unbind(|_, item| {
             let item = item.downcast_ref::<gtk::ListItem>().unwrap();
             if let Some(hbox) = item.child().and_downcast::<gtk::Box>() {
+                thumb_slot(&hbox).clear();
                 hbox.set_tooltip_text(None);
             }
         });
@@ -555,7 +529,8 @@ impl FileListView {
     ) -> gtk::GridView {
         let factory = gtk::SignalListItemFactory::new();
 
-        factory.connect_setup(|_, item| {
+        let drag_selection = selection.clone();
+        factory.connect_setup(move |_, item| {
             let item = item.downcast_ref::<gtk::ListItem>().unwrap();
             let vbox = gtk::Box::new(gtk::Orientation::Vertical, 4);
             vbox.set_halign(gtk::Align::Center);
@@ -578,24 +553,7 @@ impl FileListView {
             label.set_halign(gtk::Align::Center);
             vbox.append(&label);
 
-            // DragSource
-            let uri_cell: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
-            let drag_source = gtk::DragSource::new();
-            drag_source.set_actions(gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE);
-            let uri_for_prepare = uri_cell.clone();
-            drag_source.connect_prepare(move |_source, _x, _y| {
-                let uri = uri_for_prepare.borrow().clone();
-                if uri.is_empty() {
-                    return None;
-                }
-                Some(gtk::gdk::ContentProvider::for_value(&uri.to_value()))
-            });
-            vbox.add_controller(drag_source);
-            unsafe {
-                vbox.set_data("drag-uri-cell", uri_cell);
-                let pos_cell: Rc<RefCell<u32>> = Rc::new(RefCell::new(u32::MAX));
-                vbox.set_data("item-pos", pos_cell);
-            }
+            attach_item_drag(&vbox, &drag_selection);
 
             item.set_child(Some(&vbox));
         });
@@ -616,31 +574,19 @@ impl FileListView {
             let label = icon.next_sibling().and_downcast::<gtk::Label>().unwrap();
 
             icon.set_icon_name(Some(&entry_obj.icon_name()));
+            show_thumbnail(&vbox, &icon, &entry_obj, thumbnails::ICON_SIZE);
             label.set_text(&entry_obj.name());
             if entry_obj.is_hidden() {
                 vbox.set_opacity(0.5);
             } else {
                 vbox.set_opacity(1.0);
             }
-
-            // Update drag URI
-            if let Some(entry) = entry_obj.entry() {
-                let uri_cell: Option<std::ptr::NonNull<Rc<RefCell<String>>>> =
-                    unsafe { vbox.data::<Rc<RefCell<String>>>("drag-uri-cell") };
-                if let Some(ptr) = uri_cell {
-                    let cell = unsafe { ptr.as_ref() };
-                    if let Some(local) = entry.path.as_local_path() {
-                        *cell.borrow_mut() = format!("file://{}\r\n", local.display());
-                    } else {
-                        *cell.borrow_mut() = String::new();
-                    }
-                }
-            }
         });
 
         factory.connect_unbind(|_, item| {
             let item = item.downcast_ref::<gtk::ListItem>().unwrap();
             if let Some(vbox) = item.child().and_downcast::<gtk::Box>() {
+                thumb_slot(&vbox).clear();
                 vbox.set_opacity(1.0);
             }
         });
@@ -685,7 +631,8 @@ impl FileListView {
     ) -> gtk::GridView {
         let factory = gtk::SignalListItemFactory::new();
 
-        factory.connect_setup(|_, item| {
+        let drag_selection = selection.clone();
+        factory.connect_setup(move |_, item| {
             let item = item.downcast_ref::<gtk::ListItem>().unwrap();
             let vbox = gtk::Box::new(gtk::Orientation::Vertical, 4);
             vbox.set_halign(gtk::Align::Center);
@@ -718,24 +665,7 @@ impl FileListView {
             label.set_halign(gtk::Align::Center);
             vbox.append(&label);
 
-            // DragSource
-            let uri_cell: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
-            let drag_source = gtk::DragSource::new();
-            drag_source.set_actions(gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE);
-            let uri_for_prepare = uri_cell.clone();
-            drag_source.connect_prepare(move |_source, _x, _y| {
-                let uri = uri_for_prepare.borrow().clone();
-                if uri.is_empty() {
-                    return None;
-                }
-                Some(gtk::gdk::ContentProvider::for_value(&uri.to_value()))
-            });
-            vbox.add_controller(drag_source);
-            unsafe {
-                vbox.set_data("drag-uri-cell", uri_cell);
-                let pos_cell: Rc<RefCell<u32>> = Rc::new(RefCell::new(u32::MAX));
-                vbox.set_data("item-pos", pos_cell);
-            }
+            attach_item_drag(&vbox, &drag_selection);
 
             item.set_child(Some(&vbox));
         });
@@ -767,49 +697,39 @@ impl FileListView {
                 vbox.set_opacity(1.0);
             }
 
-            // Determine if this is an image file
-            let is_image = entry_obj
+            // The type icon until a thumbnail is ready, which for anything
+            // already thumbnailed is before this returns.
+            picture.set_visible(false);
+            picture.set_filename(None::<&std::path::Path>);
+            icon_fallback.set_icon_name(Some(&entry_obj.icon_name()));
+            icon_fallback.set_visible(true);
+
+            let local = entry_obj
                 .entry()
-                .and_then(|e| e.extension().map(|s| s.to_lowercase()))
-                .map(|ext| {
-                    matches!(
-                        ext.as_str(),
-                        "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "bmp"
-                    )
-                })
-                .unwrap_or(false);
-
-            if is_image {
-                if let Some(entry) = entry_obj.entry() {
-                    if let Some(local) = entry.path.as_local_path() {
-                        picture.set_filename(Some(local));
-                        picture.set_visible(true);
-                        icon_fallback.set_visible(false);
-                    } else {
-                        picture.set_visible(false);
-                        icon_fallback.set_icon_name(Some(&entry_obj.icon_name()));
-                        icon_fallback.set_visible(true);
-                    }
-                }
+                .and_then(|e| e.path.as_local_path().map(|p| p.to_path_buf()));
+            let Some(local) = local else {
+                thumb_slot(&vbox).clear();
+                return;
+            };
+            let is_svg = local
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"));
+            if is_svg {
+                // Vector images need no thumbnail; GTK renders them at size.
+                thumb_slot(&vbox).clear();
+                picture.set_filename(Some(&local));
+                picture.set_visible(true);
+                icon_fallback.set_visible(false);
             } else {
-                picture.set_visible(false);
-                picture.set_filename(None::<&std::path::Path>);
-                icon_fallback.set_icon_name(Some(&entry_obj.icon_name()));
-                icon_fallback.set_visible(true);
-            }
-
-            // Update drag URI
-            if let Some(entry) = entry_obj.entry() {
-                let uri_cell: Option<std::ptr::NonNull<Rc<RefCell<String>>>> =
-                    unsafe { vbox.data::<Rc<RefCell<String>>>("drag-uri-cell") };
-                if let Some(ptr) = uri_cell {
-                    let cell = unsafe { ptr.as_ref() };
-                    if let Some(local) = entry.path.as_local_path() {
-                        *cell.borrow_mut() = format!("file://{}\r\n", local.display());
-                    } else {
-                        *cell.borrow_mut() = String::new();
+                let weak_picture = picture.downgrade();
+                let weak_icon = icon_fallback.downgrade();
+                thumb_slot(&vbox).request(&local, thumbnails::PREVIEW_SIZE, move |thumb| {
+                    if let (Some(picture), Some(icon)) = (weak_picture.upgrade(), weak_icon.upgrade()) {
+                        picture.set_filename(Some(thumb));
+                        picture.set_visible(true);
+                        icon.set_visible(false);
                     }
-                }
+                });
             }
         });
 
@@ -997,6 +917,100 @@ fn activate_entry(
 }
 
 /// Shared file drop handler for all view modes.
+/// The item's thumbnail slot, created on first use.
+fn thumb_slot(item: &gtk::Box) -> Slot {
+    unsafe {
+        if let Some(slot) = item.data::<Slot>("thumb-slot") {
+            return slot.as_ref().clone();
+        }
+        let slot = Slot::default();
+        item.set_data("thumb-slot", slot.clone());
+        slot
+    }
+}
+
+/// Swap `icon`'s type icon for a thumbnail when the entry is an image or
+/// video. The caller has already set the type icon, which stays otherwise.
+fn show_thumbnail(item: &gtk::Box, icon: &gtk::Image, entry_obj: &FileEntryObject, size: u32) {
+    let slot = thumb_slot(item);
+    let local = entry_obj
+        .entry()
+        .and_then(|e| e.path.as_local_path().map(|p| p.to_path_buf()));
+    let Some(local) = local else {
+        slot.clear();
+        return;
+    };
+    let weak = icon.downgrade();
+    slot.request(&local, size, move |thumb| {
+        if let Some(icon) = weak.upgrade() {
+            icon.set_from_file(Some(thumb));
+        }
+    });
+}
+
+/// Make a list item draggable, and give it the "item-pos" cell that bind
+/// keeps current and both the drag and right-click read.
+fn attach_item_drag(widget: &gtk::Box, selection: &gtk::MultiSelection) {
+    let pos_cell: Rc<RefCell<u32>> = Rc::new(RefCell::new(u32::MAX));
+
+    let drag_source = gtk::DragSource::new();
+    drag_source.set_actions(gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE);
+    let sel = selection.clone();
+    let pos = pos_cell.clone();
+    drag_source.connect_prepare(move |_source, _x, _y| drag_content(&sel, *pos.borrow()));
+    // Weak: the controller is owned by the widget it would otherwise keep alive.
+    let weak = widget.downgrade();
+    drag_source.connect_drag_begin(move |source, _drag| {
+        if let Some(widget) = weak.upgrade() {
+            source.set_icon(Some(&gtk::WidgetPaintable::new(Some(&widget))), 0, 0);
+        }
+    });
+    widget.add_controller(drag_source);
+
+    unsafe {
+        widget.set_data("item-pos", pos_cell);
+    }
+}
+
+/// The data a drag out of the list carries: the whole selection when the
+/// dragged item is part of it, otherwise just that item.
+///
+/// Other applications (browsers, editors, chat clients) only accept files as
+/// a GdkFileList, which GTK offers as text/uri-list and through the portal's
+/// file transfer for sandboxed apps. Raven's own drop targets read a plain
+/// string of unescaped `file://` lines, so that is offered alongside.
+fn drag_content(selection: &gtk::MultiSelection, pos: u32) -> Option<gtk::gdk::ContentProvider> {
+    if pos == u32::MAX {
+        return None;
+    }
+    let positions: Vec<u32> = if selection.is_selected(pos) {
+        (0..selection.n_items())
+            .filter(|&i| selection.is_selected(i))
+            .collect()
+    } else {
+        vec![pos]
+    };
+    let paths: Vec<std::path::PathBuf> = positions
+        .into_iter()
+        .filter_map(|i| selection.item(i).and_downcast::<FileEntryObject>())
+        .filter_map(|obj| obj.entry())
+        .filter_map(|entry| entry.path.as_local_path().map(|p| p.to_path_buf()))
+        .collect();
+    if paths.is_empty() {
+        return None;
+    }
+
+    let files: Vec<gtk::gio::File> = paths.iter().map(gtk::gio::File::for_path).collect();
+    let internal: String = paths
+        .iter()
+        .map(|p| format!("file://{}\r\n", p.display()))
+        .collect();
+    Some(gtk::gdk::ContentProvider::new_union(&[
+        gtk::gdk::ContentProvider::for_value(&gtk::gdk::FileList::from_array(&files).to_value()),
+        gtk::gdk::ContentProvider::for_value(&internal.to_value()),
+    ]))
+}
+
 fn handle_file_drop(
     value: &glib::Value,
     state: &AppState,

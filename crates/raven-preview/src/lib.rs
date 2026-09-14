@@ -3,6 +3,8 @@ pub mod directory;
 pub mod image_preview;
 pub mod router;
 pub mod text;
+pub mod thumbnail;
+pub mod video;
 
 use async_trait::async_trait;
 use raven_core::error::RavenResult;

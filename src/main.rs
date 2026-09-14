@@ -37,6 +37,8 @@ use raven_system::systemd::SystemdInspector;
 use raven_ui::app::RavenApplication;
 use raven_vfs::router::VfsRouter;
 
+mod portal_mode;
+
 /// Cache entries older than this are revalidated in the background.
 const CACHE_TTL: Duration = Duration::from_secs(30);
 
@@ -50,6 +52,12 @@ fn main() -> glib::ExitCode {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+
+    // D-Bus activation runs the binary with `--portal` to serve open/save
+    // dialogs for xdg-desktop-portal instead of opening a file manager window.
+    if std::env::args().skip(1).any(|a| a == "--portal") {
+        return portal_mode::run();
+    }
 
     tracing::info!("Starting Raven File Manager");
 

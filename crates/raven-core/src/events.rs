@@ -218,6 +218,15 @@ pub enum PreviewData {
         width: u32,
         height: u32,
     },
+    /// A still frame plus what ffprobe could tell. Everything but `path` is
+    /// best-effort: without ffmpeg installed the UI still gets a video entry.
+    Video {
+        path: std::path::PathBuf,
+        thumbnail: Option<std::path::PathBuf>,
+        width: u32,
+        height: u32,
+        duration_secs: Option<f64>,
+    },
     Directory {
         item_count: u64,
         total_size: u64,

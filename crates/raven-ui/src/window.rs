@@ -40,7 +40,6 @@ pub struct RavenWindow {
     tab_bar: Rc<TabBar>,
     search_bar: Rc<SearchBar>,
     preview_panel: Rc<PreviewPanel>,
-    preview_separator: gtk::Separator,
     operation_panel: Rc<OperationPanel>,
     status_label: gtk::Label,
     container_banner: Rc<ContainerBanner>,
@@ -778,6 +777,77 @@ impl RavenWindow {
         content_box.append(&preview_separator);
         content_box.append(&preview_panel.widget);
 
+        let preview_btn = gtk::ToggleButton::new();
+        preview_btn.set_icon_name("sidebar-show-right-symbolic");
+        preview_btn.set_tooltip_text(Some("Preview panel (Space)"));
+        header.pack_end(&preview_btn);
+        {
+            let panel = preview_panel.clone();
+            let separator = preview_separator.clone();
+            let views = views.clone();
+            let cmd_tx = command_tx.clone();
+            preview_btn.connect_toggled(move |btn| {
+                let show = btn.is_active();
+                panel.widget.set_visible(show);
+                separator.set_visible(show);
+                if show {
+                    preview_selection(&views, &panel, &cmd_tx);
+                }
+            });
+        }
+
+        // Follow the selection while the panel is open. Debounced so holding
+        // an arrow key through a folder does not queue a preview per file.
+        {
+            let pending: Rc<RefCell<Option<gtk::glib::SourceId>>> = Rc::new(RefCell::new(None));
+            for file_list in [views.left.file_list.clone(), views.right.file_list.clone()] {
+                let panel = preview_panel.clone();
+                let views = views.clone();
+                let cmd_tx = command_tx.clone();
+                let pending = pending.clone();
+                file_list.selection.connect_selection_changed(move |_, _, _| {
+                    if !panel.widget.is_visible() {
+                        return;
+                    }
+                    if let Some(id) = pending.borrow_mut().take() {
+                        id.remove();
+                    }
+                    let panel = panel.clone();
+                    let views = views.clone();
+                    let cmd_tx = cmd_tx.clone();
+                    let fired = pending.clone();
+                    let id = gtk::glib::timeout_add_local_once(
+                        std::time::Duration::from_millis(80),
+                        move || {
+                            fired.borrow_mut().take();
+                            preview_selection(&views, &panel, &cmd_tx);
+                        },
+                    );
+                    *pending.borrow_mut() = Some(id);
+                });
+            }
+        }
+
+        {
+            let state = state.clone();
+            let cmd_tx = command_tx.clone();
+            preview_panel.connect_open(move |path| {
+                if path.as_local_path().is_some_and(|p| p.is_dir()) {
+                    let pane_id = active_pane_id(&state);
+                    if let Some(pane) = state.borrow_mut().pane_by_id_mut(pane_id) {
+                        pane.navigate_to(path.clone());
+                    }
+                    let _ = cmd_tx.send(AppCommand::Navigate {
+                        path: path.clone(),
+                        pane_id,
+                    });
+                } else {
+                    let config = state.borrow().config.clone();
+                    crate::file_opener::open_file(path, &config);
+                }
+            });
+        }
+
         toolbar_view.set_content(Some(&content_box));
 
         // --- Operation panel ---
@@ -892,8 +962,7 @@ impl RavenWindow {
                 views: views.clone(),
                 hidden_btn: hidden_btn.clone(),
                 search_btn: search_btn.clone(),
-                preview_panel: preview_panel.clone(),
-                preview_separator: preview_separator.clone(),
+                preview_btn: preview_btn.clone(),
                 tab_bar: tab_bar.clone(),
                 properties_dialog: properties_dialog.clone(),
             };
@@ -976,7 +1045,6 @@ impl RavenWindow {
             tab_bar,
             search_bar,
             preview_panel,
-            preview_separator,
             operation_panel,
             status_label,
             container_banner,
@@ -1975,10 +2043,25 @@ struct KeyContext {
     views: Rc<PaneViews>,
     hidden_btn: gtk::ToggleButton,
     search_btn: gtk::ToggleButton,
-    preview_panel: Rc<PreviewPanel>,
-    preview_separator: gtk::Separator,
+    preview_btn: gtk::ToggleButton,
     tab_bar: Rc<TabBar>,
     properties_dialog: Rc<RefCell<Option<Rc<RefCell<PropertiesDialog>>>>>,
+}
+
+/// Show the active pane's selected file in the preview panel, or clear the
+/// panel when nothing is selected.
+fn preview_selection(
+    views: &PaneViews,
+    panel: &PreviewPanel,
+    cmd_tx: &tokio::sync::mpsc::UnboundedSender<AppCommand>,
+) {
+    match get_primary_selected_entry(&views.active().file_list) {
+        Some(entry) => {
+            panel.request(&entry.path);
+            let _ = cmd_tx.send(AppCommand::GeneratePreview { path: entry.path });
+        }
+        None => panel.clear(),
+    }
 }
 
 /// Run the named action. Returns `false` for an action this window does not
@@ -2017,21 +2100,7 @@ fn dispatch_key_action(ctx: &KeyContext, action: &str) -> bool {
         "edit_path" => ctx.views.active().path_bar.toggle_edit_mode(),
         "toggle_hidden" => ctx.hidden_btn.set_active(!ctx.hidden_btn.is_active()),
         "toggle_search" => ctx.search_btn.set_active(!ctx.search_btn.is_active()),
-        "toggle_preview" => {
-            let show = !ctx.preview_panel.widget.is_visible();
-            ctx.preview_panel.widget.set_visible(show);
-            ctx.preview_separator.set_visible(show);
-            if show {
-                let path = ctx
-                    .state
-                    .borrow()
-                    .active_tab()
-                    .active_pane()
-                    .current_path
-                    .clone();
-                let _ = ctx.cmd_tx.send(AppCommand::GeneratePreview { path });
-            }
-        }
+        "toggle_preview" => ctx.preview_btn.set_active(!ctx.preview_btn.is_active()),
         "new_tab" => {
             let path = ctx
                 .state

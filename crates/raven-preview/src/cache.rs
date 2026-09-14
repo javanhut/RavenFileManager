@@ -39,6 +39,13 @@ enum CachedPreviewData {
         width: u32,
         height: u32,
     },
+    Video {
+        path: PathBuf,
+        thumbnail: Option<PathBuf>,
+        width: u32,
+        height: u32,
+        duration_secs: Option<f64>,
+    },
     Directory {
         item_count: u64,
         total_size: u64,
@@ -63,6 +70,19 @@ impl From<&PreviewData> for CachedPreviewData {
                 path: path.clone(),
                 width: *width,
                 height: *height,
+            },
+            PreviewData::Video {
+                path,
+                thumbnail,
+                width,
+                height,
+                duration_secs,
+            } => CachedPreviewData::Video {
+                path: path.clone(),
+                thumbnail: thumbnail.clone(),
+                width: *width,
+                height: *height,
+                duration_secs: *duration_secs,
             },
             PreviewData::Directory {
                 item_count,
@@ -92,6 +112,19 @@ impl From<CachedPreviewData> for PreviewData {
                 path,
                 width,
                 height,
+            },
+            CachedPreviewData::Video {
+                path,
+                thumbnail,
+                width,
+                height,
+                duration_secs,
+            } => PreviewData::Video {
+                path,
+                thumbnail,
+                width,
+                height,
+                duration_secs,
             },
             CachedPreviewData::Directory {
                 item_count,

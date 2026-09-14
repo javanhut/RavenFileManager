@@ -12,7 +12,7 @@ CARGO_FLAGS := $(if $(filter release,$(PROFILE)),--release,)
 TARGET_DIR := target/$(PROFILE)
 BINARY     := $(TARGET_DIR)/$(BIN_NAME)
 
-.PHONY: all build run test clean install uninstall
+.PHONY: all build run test clean install uninstall install-portal-system uninstall-portal-system
 
 all: build
 
@@ -62,8 +62,29 @@ install: build
 	sed 's|@BINDIR@|$(BINDIR)|g' data/org.freedesktop.FileManager1.service.in \
 		> "$(DESTDIR)$(DATADIR)/dbus-1/services/org.freedesktop.FileManager1.service"
 	chmod 0644 "$(DESTDIR)$(DATADIR)/dbus-1/services/org.freedesktop.FileManager1.service"
+	@# xdg-desktop-portal FileChooser backend: open/save dialogs from browsers
+	@# and other portal users are shown by `ravenfilemanager --portal`.
+	sed 's|@BINDIR@|$(BINDIR)|g' data/org.freedesktop.impl.portal.desktop.raven.service.in \
+		> "$(DESTDIR)$(DATADIR)/dbus-1/services/org.freedesktop.impl.portal.desktop.raven.service"
+	chmod 0644 "$(DESTDIR)$(DATADIR)/dbus-1/services/org.freedesktop.impl.portal.desktop.raven.service"
+	install -Dm644 data/raven.portal                            "$(DESTDIR)$(DATADIR)/xdg-desktop-portal/portals/raven.portal"
+	@# Route FileChooser to Raven for this user, but never overwrite a
+	@# portals.conf the user already has.
+	@if [ -z "$(DESTDIR)" ] && [ ! -e "$(HOME)/.config/xdg-desktop-portal/portals.conf" ]; then \
+		install -Dm644 data/raven-portals.conf "$(HOME)/.config/xdg-desktop-portal/portals.conf"; \
+		echo "Installed $(HOME)/.config/xdg-desktop-portal/portals.conf"; \
+	fi
 	$(update-caches)
 	@echo "Installation complete."
+
+# xdg-desktop-portal only reads backend descriptions from its own data dir
+# (/usr/share/xdg-desktop-portal/portals), so a PREFIX=$HOME/.local install
+# needs this once, as root, before the portal will use Raven.
+install-portal-system:
+	install -Dm644 data/raven.portal /usr/share/xdg-desktop-portal/portals/raven.portal
+
+uninstall-portal-system:
+	rm -f /usr/share/xdg-desktop-portal/portals/raven.portal
 
 uninstall:
 	@echo "Uninstalling $(BIN_NAME)..."
@@ -72,6 +93,8 @@ uninstall:
 	rm -f  "$(DESTDIR)$(DATADIR)/metainfo/$(APP_ID).metainfo.xml"
 	rm -f  "$(DESTDIR)$(ICONDIR)/$(APP_ID).svg"
 	rm -f  "$(DESTDIR)$(DATADIR)/dbus-1/services/org.freedesktop.FileManager1.service"
+	rm -f  "$(DESTDIR)$(DATADIR)/dbus-1/services/org.freedesktop.impl.portal.desktop.raven.service"
+	rm -f  "$(DESTDIR)$(DATADIR)/xdg-desktop-portal/portals/raven.portal"
 	rm -rf "$(DESTDIR)$(DATADIR)/$(BIN_NAME)"
 	$(update-caches)
 	@echo "Uninstall complete."

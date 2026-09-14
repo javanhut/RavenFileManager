@@ -15,6 +15,8 @@ profile = "release"
 cargo_flags = "--release"
 target_dir = "target/{{profile}}"
 binary = "{{target_dir}}/{{bin_name}}"
+# xdg-desktop-portal 1.22 reads backend descriptions from here only.
+portal_system_dir = "/usr/share/xdg-desktop-portal/portals"
 update_caches = "if [ -z \"{{destdir}}\" ]; then command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q \"{{datadir}}/applications\" || true; command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -qtf \"{{datadir}}/icons/hicolor\" || true; fi"
 
 [commands]
@@ -54,8 +56,24 @@ run = [
   "install -d \"{{destdir}}{{datadir}}/dbus-1/services\"",
   "sed 's|@BINDIR@|{{bindir}}|g' data/org.freedesktop.FileManager1.service.in > \"{{destdir}}{{datadir}}/dbus-1/services/org.freedesktop.FileManager1.service\"",
   "chmod 0644 \"{{destdir}}{{datadir}}/dbus-1/services/org.freedesktop.FileManager1.service\"",
+  "# xdg-desktop-portal FileChooser backend: open/save dialogs from browsers",
+  "# and other portal users are shown by `ravenfilemanager --portal`.",
+  "sed 's|@BINDIR@|{{bindir}}|g' data/org.freedesktop.impl.portal.desktop.raven.service.in > \"{{destdir}}{{datadir}}/dbus-1/services/org.freedesktop.impl.portal.desktop.raven.service\"",
+  "chmod 0644 \"{{destdir}}{{datadir}}/dbus-1/services/org.freedesktop.impl.portal.desktop.raven.service\"",
+  "install -Dm644 data/raven.portal \"{{destdir}}{{datadir}}/xdg-desktop-portal/portals/raven.portal\"",
+  "# The portal ignores the copy above, so register it where it looks. Asks",
+  "# for sudo only when that copy is missing or out of date.",
+  "if [ -z \"{{destdir}}\" ] && ! cmp -s data/raven.portal \"{{portal_system_dir}}/raven.portal\"; then echo \"Registering the Raven file chooser with xdg-desktop-portal (needs sudo)...\"; sudo install -Dm644 data/raven.portal \"{{portal_system_dir}}/raven.portal\"; fi",
+  "# Route FileChooser to Raven for this user, keeping any portals.conf already there.",
+  "if [ -z \"{{destdir}}\" ]; then conf=\"$HOME/.config/xdg-desktop-portal/portals.conf\"; if [ ! -e \"$conf\" ]; then install -Dm644 data/raven-portals.conf \"$conf\"; echo \"Installed $conf\"; elif ! grep -q '^org.freedesktop.impl.portal.FileChooser=raven' \"$conf\"; then echo \"Note: $conf exists and does not pick Raven; add org.freedesktop.impl.portal.FileChooser=raven under [preferred]\"; fi; fi",
+  "# Restart the portal and any Raven picker still running the old binary;",
+  "# D-Bus starts both again on the next request.",
+  "if [ -z \"{{destdir}}\" ]; then pkill -f '^/usr/lib/xdg-desktop-portal$' || true; pkill -f '^{{bindir}}/{{bin_name}} --portal$' || true; fi",
+  "# An install under another prefix earlier on PATH (or in XDG_DATA_HOME)",
+  "# would keep running instead of this one.",
+  "if [ -z \"{{destdir}}\" ]; then found=$(command -v {{bin_name}}); if [ -n \"$found\" ] && [ \"$found\" != \"{{bindir}}/{{bin_name}}\" ]; then echo \"Warning: $found comes first on PATH and shadows {{bindir}}/{{bin_name}}\"; fi; fi",
   "{{update_caches}}",
-  "echo \"Installation complete.\"",
+  "echo \"Installation complete. Restart Brave (or any open browser) to use the new file chooser.\"",
 ]
 dep = ["build"]
 
@@ -67,6 +85,9 @@ run = [
   "rm -f \"{{destdir}}{{datadir}}/metainfo/{{app_id}}.metainfo.xml\"",
   "rm -f \"{{destdir}}{{icondir}}/{{app_id}}.svg\"",
   "rm -f \"{{destdir}}{{datadir}}/dbus-1/services/org.freedesktop.FileManager1.service\"",
+  "rm -f \"{{destdir}}{{datadir}}/dbus-1/services/org.freedesktop.impl.portal.desktop.raven.service\"",
+  "rm -f \"{{destdir}}{{datadir}}/xdg-desktop-portal/portals/raven.portal\"",
+  "if [ -z \"{{destdir}}\" ] && [ -e \"{{portal_system_dir}}/raven.portal\" ]; then sudo rm -f \"{{portal_system_dir}}/raven.portal\"; fi",
   "rm -rf \"{{destdir}}{{datadir}}/{{bin_name}}\"",
   "{{update_caches}}",
   "echo \"Uninstall complete.\"",

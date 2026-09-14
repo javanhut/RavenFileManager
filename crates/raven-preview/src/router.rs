@@ -7,6 +7,7 @@ use crate::cache::PreviewCache;
 use crate::directory::DirectoryPreview;
 use crate::image_preview::ImagePreview;
 use crate::text::TextPreview;
+use crate::video::VideoPreview;
 use crate::{path_extension, require_local, PreviewProvider};
 
 /// Routes preview requests to the appropriate `PreviewProvider` based
@@ -18,6 +19,7 @@ use crate::{path_extension, require_local, PreviewProvider};
 pub struct PreviewRouter {
     text: TextPreview,
     image: ImagePreview,
+    video: VideoPreview,
     directory: DirectoryPreview,
     cache: Option<PreviewCache>,
 }
@@ -28,6 +30,7 @@ impl PreviewRouter {
         Self {
             text: TextPreview::new(),
             image: ImagePreview::new(),
+            video: VideoPreview::new(),
             directory: DirectoryPreview::new(),
             cache: None,
         }
@@ -91,6 +94,11 @@ impl PreviewRouter {
             if self.image.supports(&ext) {
                 debug!(path = %path, ext = %ext, "routing to image provider");
                 return self.image.generate(path).await;
+            }
+
+            if self.video.supports(&ext) {
+                debug!(path = %path, ext = %ext, "routing to video provider");
+                return self.video.generate(path).await;
             }
 
             // No provider found for this extension
