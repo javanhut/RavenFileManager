@@ -1,4 +1,4 @@
-//! Small cached thumbnails for images and videos.
+//! Small cached thumbnails for images, videos and PDFs.
 //!
 //! Used by the list and grid views, which need many of them quickly, and by
 //! the preview panel. Thumbnails are PNGs under
@@ -23,6 +23,9 @@ pub const VIDEO_EXTENSIONS: &[&str] = &[
     "ts", "mts", "m2ts",
 ];
 
+/// Paged documents whose first page is rendered in-process (see `pdf`).
+pub const DOCUMENT_EXTENSIONS: &[&str] = &["pdf"];
+
 /// Thumbnails generated at once. Video frames cost an ffmpeg process each,
 /// and a folder of hundreds should not start hundreds of them.
 const MAX_CONCURRENT: usize = 3;
@@ -35,6 +38,7 @@ const FFMPEG_TIMEOUT: Duration = Duration::from_secs(15);
 pub enum ThumbnailKind {
     Image,
     Video,
+    Document,
 }
 
 /// What kind of thumbnail `path` can have, judged by extension.
@@ -44,6 +48,8 @@ pub fn kind_for(path: &Path) -> Option<ThumbnailKind> {
         Some(ThumbnailKind::Image)
     } else if VIDEO_EXTENSIONS.contains(&ext.as_str()) {
         Some(ThumbnailKind::Video)
+    } else if DOCUMENT_EXTENSIONS.contains(&ext.as_str()) {
+        Some(ThumbnailKind::Document)
     } else {
         None
     }
@@ -83,6 +89,24 @@ pub fn lookup(path: &Path, size: u32) -> Option<PathBuf> {
 /// a row that has since scrolled away is dropped instead of done.
 pub fn generate(path: &Path, size: u32, still_wanted: impl Fn() -> bool) -> Option<PathBuf> {
     let kind = kind_for(path)?;
+    generate_with(path, size, still_wanted, |tmp| match kind {
+        ThumbnailKind::Image => image_thumbnail(path, tmp, size),
+        ThumbnailKind::Video => video_thumbnail(path, tmp, size),
+        ThumbnailKind::Document => crate::pdf::render_first_page(path, tmp, size),
+    })
+}
+
+/// `generate` with the rendering supplied by the caller: `make` writes the
+/// thumbnail to the path it is given and says whether it did. It is only
+/// called when the thumbnail is not cached, under a generation slot, so a
+/// caller that learns more from the file while rendering (the PDF preview
+/// reads the page count from the same parse) does not have to open it twice.
+pub(crate) fn generate_with(
+    path: &Path,
+    size: u32,
+    still_wanted: impl Fn() -> bool,
+    make: impl FnOnce(&Path) -> bool,
+) -> Option<PathBuf> {
     let target = cached_path(path, size)?;
     if target.is_file() {
         return Some(target);
@@ -105,10 +129,7 @@ pub fn generate(path: &Path, size: u32, still_wanted: impl Fn() -> bool) -> Opti
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
 
-    let made = match kind {
-        ThumbnailKind::Image => image_thumbnail(path, &tmp, size),
-        ThumbnailKind::Video => video_thumbnail(path, &tmp, size),
-    };
+    let made = make(&tmp);
     // Written aside and renamed, so a reader never sees half a PNG.
     if made && std::fs::rename(&tmp, &target).is_ok() {
         Some(target)
@@ -201,6 +222,12 @@ impl Drop for Permit {
     }
 }
 
+/// Held by tests that generate thumbnails. One of them points
+/// `XDG_CACHE_HOME` at a temporary directory that is deleted when it ends, and
+/// generating into that directory at the same time fails.
+#[cfg(test)]
+pub(crate) static CACHE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,12 +236,14 @@ mod tests {
     fn kind_is_judged_by_extension() {
         assert_eq!(kind_for(Path::new("/a/b.PNG")), Some(ThumbnailKind::Image));
         assert_eq!(kind_for(Path::new("/a/b.mkv")), Some(ThumbnailKind::Video));
+        assert_eq!(kind_for(Path::new("/a/b.Pdf")), Some(ThumbnailKind::Document));
         assert_eq!(kind_for(Path::new("/a/b.svg")), None);
         assert_eq!(kind_for(Path::new("/a/b")), None);
     }
 
     #[test]
     fn image_thumbnail_is_generated_and_reused() {
+        let _env = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_CACHE_HOME", dir.path().join("cache"));
         let src = dir.path().join("big.png");
@@ -225,6 +254,17 @@ mod tests {
         let (w, h) = image::image_dimensions(&thumb).unwrap();
         assert_eq!((w, h), (64, 32));
         assert_eq!(lookup(&src, 64), Some(thumb));
+    }
+
+    #[test]
+    fn pdf_thumbnail_is_the_first_page() {
+        let _env = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("doc.pdf");
+        std::fs::write(&src, crate::pdf::sample_pdf(2, Some("t"))).unwrap();
+        // A size no other test uses, so the shared cache cannot already hold it.
+        let thumb = generate(&src, 48, || true).expect("pdf thumbnail");
+        assert_eq!(image::image_dimensions(&thumb).unwrap(), (48, 36));
     }
 
     #[test]

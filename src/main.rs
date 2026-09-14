@@ -217,11 +217,15 @@ fn main() -> glib::ExitCode {
             for dir in PluginManager::default_plugin_dirs() {
                 plugin_manager.add_plugin_dir(dir);
             }
+            // The window publishes the active pane's selection here; plugins
+            // and the D-Bus service read it.
+            let shared_selection = raven_plugin::selection::SharedSelection::global();
             let plugin_api: Arc<dyn raven_plugin::api::PluginApi> = Arc::new(ChannelPluginApi::new(
                 command_tx_for_backend.clone(),
                 event_tx.clone(),
                 current_pane_id.clone(),
                 AppConfig::config_dir(),
+                shared_selection.clone(),
             ));
             // Auto-load enabled plugins
             if config.plugins.enabled {
@@ -250,16 +254,38 @@ fn main() -> glib::ExitCode {
             }
 
             // --- DBus service ---
-            let dbus_service = Arc::new(DbusService::new(
-                command_tx_for_dbus,
-                config.dbus.bus_name.clone(),
-            ));
-            if config.dbus.enabled {
-                tracing::info!(
-                    "DBus service initialized with bus name: {}",
-                    dbus_service.bus_name()
-                );
-            }
+            let dbus_service = Arc::new(
+                DbusService::new(command_tx_for_dbus, config.dbus.bus_name.clone())
+                    .with_selection(shared_selection.inner()),
+            );
+            // Held for the same reason as the FileManager1 connection below:
+            // dropping it gives up the name. Queued behind another window when
+            // one already owns it, taking over when that window closes.
+            let _dbus_connection = if config.dbus.enabled {
+                match dbus_service.serve().await {
+                    Ok((connection, owns)) => {
+                        if owns {
+                            tracing::info!(
+                                "Serving {} at {}",
+                                dbus_service.bus_name(),
+                                dbus_service.object_path()
+                            );
+                        } else {
+                            tracing::info!(
+                                "Queued for {} behind another window",
+                                dbus_service.bus_name()
+                            );
+                        }
+                        Some(connection)
+                    }
+                    Err(e) => {
+                        tracing::warn!("Could not serve {}: {}", dbus_service.bus_name(), e);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
 
             // --- org.freedesktop.FileManager1 ---
             //
@@ -1321,6 +1347,37 @@ fn main() -> glib::ExitCode {
                         });
                     }
 
+                    AppCommand::RunPluginAction {
+                        plugin_id,
+                        action,
+                        paths,
+                    } => {
+                        // The plugin's script runs to completion, like any hook.
+                        tokio::task::spawn_blocking(move || {
+                            let Ok(manager) = plugin_manager.lock() else {
+                                return;
+                            };
+                            let paths: Vec<String> = paths
+                                .iter()
+                                .map(|p| p.to_string_lossy().to_string())
+                                .collect();
+                            match manager.invoke_action(&plugin_id, &action, &paths) {
+                                Ok(()) => tracing::info!(
+                                    "Plugin {} ran {} on {} item(s)",
+                                    plugin_id,
+                                    action,
+                                    paths.len()
+                                ),
+                                Err(e) => {
+                                    let _ = event_tx.send(AppEvent::PluginError {
+                                        plugin_id,
+                                        error: e,
+                                    });
+                                }
+                            }
+                        });
+                    }
+
                     // --- Network connections ---
                     AppCommand::ConnectSftp {
                         host,
@@ -1372,12 +1429,41 @@ fn main() -> glib::ExitCode {
                     AppCommand::ConnectSmb {
                         host,
                         share,
-                        user: _,
-                        password: _,
+                        path,
+                        user,
+                        password,
+                        domain,
                     } => {
-                        let _ = event_tx.send(AppEvent::RemoteError {
-                            id: format!("smb://{}/{}", host, share),
-                            error: "SMB support not yet available".to_string(),
+                        // The credentials live only in the router's memory from here on.
+                        let credentials = raven_vfs::smb::SmbCredentials {
+                            user: user.unwrap_or_default(),
+                            password: password.unwrap_or_default(),
+                            domain: domain.unwrap_or_default(),
+                        };
+                        tokio::spawn(async move {
+                            match vfs_router
+                                .connect_smb(&host, &share, path.as_deref(), credentials)
+                                .await
+                            {
+                                Ok((key, initial_path)) => {
+                                    let _ = event_tx.send(AppEvent::RemoteConnected {
+                                        id: key,
+                                        protocol: "smb".to_string(),
+                                        host: if share.is_empty() {
+                                            host
+                                        } else {
+                                            format!("{} on {}", share, host)
+                                        },
+                                        initial_path,
+                                    });
+                                }
+                                Err(e) => {
+                                    let _ = event_tx.send(AppEvent::RemoteError {
+                                        id: VfsRouter::smb_key(&host, &share),
+                                        error: e.to_string(),
+                                    });
+                                }
+                            }
                         });
                     }
 
@@ -1385,7 +1471,12 @@ fn main() -> glib::ExitCode {
                         let vfs_router = vfs_router.clone();
                         let id_clone = id.clone();
                         tokio::spawn(async move {
-                            match vfs_router.disconnect_sftp(&id_clone).await {
+                            let result = if id_clone.starts_with("smb://") {
+                                vfs_router.disconnect_smb(&id_clone).await
+                            } else {
+                                vfs_router.disconnect_sftp(&id_clone).await
+                            };
+                            match result {
                                 Ok(()) => {
                                     let _ = event_tx.send(AppEvent::RemoteDisconnected {
                                         id: id_clone,

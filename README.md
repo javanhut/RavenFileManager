@@ -140,6 +140,40 @@ cargo test --workspace
 make clean
 ```
 
+### Snapshot Mode (development)
+
+With `RAVEN_FM_SNAPSHOT=<dir>` set, the file manager walks its window through
+its main states — list, icon and preview views, the preview panel on an image
+and on a text file, the context menu, dual pane, the settings, properties,
+connect, Open With and portal open/save dialogs — writes each as a numbered
+PNG into `<dir>`, and exits. It never runs without the variable.
+`RAVEN_FM_SNAPSHOT_MEDIA=<folder>` picks the folder used for the thumbnail and
+preview states (default `~/Pictures`, else the home folder).
+
+Run it on a headless Broadway display with a scratch config, so nothing shows
+on the desktop and your own settings are untouched:
+
+```sh
+dbus-run-session -- bash -c '
+  gtk4-broadwayd :9 & B=$!; sleep 1
+  GDK_BACKEND=broadway BROADWAY_DISPLAY=:9 XDG_CONFIG_HOME=/tmp/rfm-config \
+    RAVEN_FM_SNAPSHOT=/tmp/rfm-shots timeout 120 target/release/ravenfilemanager
+  kill $B'
+```
+
+Put a `raven/desktop.toml` in the scratch config (`[appearance] theme_mode`,
+`accent`, `transparency`) to see light mode or another accent.
+
+## Look
+
+Raven File Manager is drawn in Raven Glass, the design shared by the Raven
+apps: `data/resources/raven-glass.css` and `raven-glass-light.css` are kept
+byte-identical with the copies in Raven Settings, Store, Power and Viewer, and
+`data/resources/style.css` holds the file manager's own classes. The default
+theme, "Raven (follows desktop)", takes accent, light or dark, and transparency
+from `~/.config/raven/desktop.toml` and follows changes made in Raven Settings
+live; the other themes keep Raven Glass's layout with their own colours.
+
 ## Configuration
 
 Raven stores its configuration at `~/.config/raven/config.toml`. A default configuration is created on first launch. See [`config/default.toml`](config/default.toml) for all available options.

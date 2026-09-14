@@ -1,59 +1,389 @@
+//! The look: Raven Glass, the stylesheet shared by the Raven apps
+//! (`data/resources/raven-glass.css`, kept byte-identical with the copies in
+//! Raven Settings, Store, Power and Viewer), then the file manager's own
+//! classes (`data/resources/style.css`).
+//!
+//! Three providers, lowest first:
+//! - `APPLICATION`: Raven Glass, then the file manager's classes.
+//! - `APPLICATION + 1`: the theme -- accent, the light sheet when light, and a
+//!   palette theme's surface colours. Replaced whenever the theme or the
+//!   desktop's appearance changes.
+//! - `APPLICATION + 2`: font and icon sizes ([`apply_sizes`]).
+//!
+//! Windows carry the `raven` class the shared sheet keys on, and `glass` while
+//! the desktop has transparency on. Both are put on every toplevel the process
+//! creates, as it is created, so no dialog can be missed.
+
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use std::time::Duration;
+
 use gtk4 as gtk;
+use gtk::prelude::*;
 use libadwaita as adw;
 
-use raven_core::config::Theme;
+use raven_core::config::{DesktopAppearance, DesktopThemeMode, Theme};
 
-pub fn is_dark_theme(theme: Theme) -> bool {
-    match theme {
-        Theme::AdwaitaLight | Theme::CatppuccinLatte => false,
-        _ => true,
+const RAVEN_GLASS_CSS: &str = include_str!("../../../data/resources/raven-glass.css");
+const RAVEN_GLASS_LIGHT_CSS: &str = include_str!("../../../data/resources/raven-glass-light.css");
+const APP_CSS: &str = include_str!("../../../data/resources/style.css");
+
+/// How long `desktop.toml` has to be quiet before it is read again: Settings
+/// writes it in several steps, and one re-read per change is enough.
+const DESKTOP_SETTLE: Duration = Duration::from_millis(150);
+
+/// Light, dark, or the desktop's "auto".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scheme {
+    Dark,
+    Light,
+    /// libadwaita prefers dark and the surfaces stay dark Raven Glass; the
+    /// light sheet is only for an explicit "light", as in Raven Store and
+    /// Raven Settings.
+    System,
+}
+
+impl Scheme {
+    fn color_scheme(self) -> adw::ColorScheme {
+        match self {
+            Scheme::Dark => adw::ColorScheme::ForceDark,
+            Scheme::Light => adw::ColorScheme::ForceLight,
+            // Dark unless the system asks for light, as the other Raven apps
+            // read "auto".
+            Scheme::System => adw::ColorScheme::PreferDark,
+        }
     }
 }
 
-pub fn apply_theme(theme: Theme) {
-    let style_manager = adw::StyleManager::default();
-    if is_dark_theme(theme) {
-        style_manager.set_color_scheme(adw::ColorScheme::ForceDark);
-    } else {
-        style_manager.set_color_scheme(adw::ColorScheme::ForceLight);
+/// The surfaces of a palette theme. Only colours: radii, hairlines and type
+/// stay Raven Glass whatever the palette.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Palette {
+    pub window: &'static str,
+    pub foreground: &'static str,
+    pub sidebar: &'static str,
+    pub dialog: &'static str,
+    pub popover: &'static str,
+}
+
+/// What a theme comes to once the desktop's appearance is known.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Look {
+    pub scheme: Scheme,
+    pub accent: String,
+    /// `None` keeps Raven Glass's own surfaces.
+    pub palette: Option<Palette>,
+}
+
+impl Look {
+    pub fn resolve(theme: Theme, desktop: &DesktopAppearance) -> Self {
+        let fixed = |light: bool, accent: &str, palette: Option<Palette>| Look {
+            scheme: if light { Scheme::Light } else { Scheme::Dark },
+            accent: accent.to_string(),
+            palette,
+        };
+        match theme {
+            Theme::Raven => Look {
+                scheme: match desktop.theme_mode {
+                    DesktopThemeMode::Dark => Scheme::Dark,
+                    DesktopThemeMode::Light => Scheme::Light,
+                    DesktopThemeMode::Auto => Scheme::System,
+                },
+                accent: desktop.accent.clone(),
+                palette: None,
+            },
+            Theme::AdwaitaDark => fixed(false, "#3584e4", None),
+            Theme::AdwaitaLight => fixed(true, "#3584e4", None),
+            Theme::CatppuccinMocha => fixed(
+                false,
+                "#cba6f7",
+                Some(Palette {
+                    window: "#1e1e2e",
+                    foreground: "#cdd6f4",
+                    sidebar: "#181825",
+                    dialog: "#24243a",
+                    popover: "#313244",
+                }),
+            ),
+            Theme::CatppuccinLatte => fixed(
+                true,
+                "#8839ef",
+                Some(Palette {
+                    window: "#eff1f5",
+                    foreground: "#4c4f69",
+                    sidebar: "#e6e9ef",
+                    dialog: "#f5f6f9",
+                    popover: "#ffffff",
+                }),
+            ),
+            Theme::Nord => fixed(
+                false,
+                "#88c0d0",
+                Some(Palette {
+                    window: "#2e3440",
+                    foreground: "#eceff4",
+                    sidebar: "#292e39",
+                    dialog: "#3b4252",
+                    popover: "#434c5e",
+                }),
+            ),
+            Theme::Dracula => fixed(
+                false,
+                "#bd93f9",
+                Some(Palette {
+                    window: "#282a36",
+                    foreground: "#f8f8f2",
+                    sidebar: "#21222c",
+                    dialog: "#2f3140",
+                    popover: "#44475a",
+                }),
+            ),
+            Theme::Frost => fixed(
+                false,
+                "#38bdf8",
+                Some(Palette {
+                    window: "#0f172a",
+                    foreground: "#e2e8f0",
+                    sidebar: "#0b1222",
+                    dialog: "#152036",
+                    popover: "#1e2a44",
+                }),
+            ),
+            Theme::RosePine => fixed(
+                false,
+                "#c4a7e7",
+                Some(Palette {
+                    window: "#191724",
+                    foreground: "#e0def4",
+                    sidebar: "#1f1d2e",
+                    dialog: "#1f1d2e",
+                    popover: "#26233a",
+                }),
+            ),
+        }
     }
 
-    let css = css_for_theme(theme);
+    /// The theme provider's stylesheet, for a scheme that came out `light`.
+    pub fn css(&self, light: bool) -> String {
+        let mut css = format!(
+            "@define-color accent_bg_color {0};\n@define-color accent_color {0};\n",
+            self.accent
+        );
+        if light {
+            css.push_str(RAVEN_GLASS_LIGHT_CSS);
+            // The light sheet sits a provider above the file manager's own
+            // rules and would win over them for the widgets both style; the
+            // rules are written against the foreground colour, so repeating
+            // them here is all light mode needs.
+            css.push_str(APP_CSS);
+        }
+        if let Some(p) = self.palette {
+            css.push_str(&palette_css(&p, light));
+        }
+        css
+    }
+}
+
+fn palette_css(p: &Palette, light: bool) -> String {
+    let glass = if light { 0.88 } else { 0.85 };
+    format!(
+        "@define-color window_bg_color {w};\n\
+         @define-color window_fg_color {f};\n\
+         @define-color headerbar_bg_color {w};\n\
+         @define-color headerbar_fg_color {f};\n\
+         @define-color view_bg_color {w};\n\
+         @define-color view_fg_color {f};\n\
+         @define-color card_fg_color {f};\n\
+         @define-color dialog_bg_color {d};\n\
+         @define-color dialog_fg_color {f};\n\
+         @define-color popover_bg_color {o};\n\
+         @define-color popover_fg_color {f};\n\
+         @define-color sidebar_bg_color {s};\n\
+         @define-color sidebar_fg_color {f};\n\
+         @define-color sidebar_backdrop_color {s};\n\
+         window.raven.glass {{ background-color: alpha({w}, {glass}); }}\n\
+         window.raven.glass .sidebar {{ background-color: alpha({s}, 0.55); }}\n",
+        w = p.window,
+        f = p.foreground,
+        s = p.sidebar,
+        d = p.dialog,
+        o = p.popover,
+    )
+}
+
+thread_local! {
+    static THEME: Cell<Theme> = const { Cell::new(Theme::Raven) };
+    /// Whether the desktop has transparency on, as last read.
+    static GLASS: Cell<bool> = const { Cell::new(false) };
+    static STARTED: Cell<bool> = const { Cell::new(false) };
+    /// The theme provider and the stylesheet it holds, so an unchanged sheet
+    /// is not reloaded (which restyles every widget).
+    static THEME_PROVIDER: RefCell<Option<(gtk::CssProvider, String)>> =
+        const { RefCell::new(None) };
+    /// Kept for the life of the process; a dropped monitor stops.
+    static DESKTOP_MONITOR: RefCell<Option<gio::FileMonitor>> = const { RefCell::new(None) };
+}
+
+/// Load the look and start following the desktop's appearance. Needs the
+/// display, so call it once the application is running; later calls only
+/// switch the theme.
+pub fn init(theme: Theme) {
+    THEME.with(|t| t.set(theme));
+    if STARTED.with(|s| s.replace(true)) {
+        refresh();
+        return;
+    }
+
     let display = gtk::gdk::Display::default().expect("Could not get default display");
+    let base = gtk::CssProvider::new();
+    base.load_from_string(&format!("{RAVEN_GLASS_CSS}\n{APP_CSS}"));
+    gtk::style_context_add_provider_for_display(
+        &display,
+        &base,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
 
-    // Remove any previously-applied theme provider
-    thread_local! {
-        static THEME_PROVIDER: std::cell::RefCell<Option<gtk::CssProvider>> =
-            const { std::cell::RefCell::new(None) };
+    refresh();
+    decorate_toplevels();
+    watch_desktop();
+}
+
+/// Switch to `theme`, as picked in the settings.
+pub fn apply_theme(theme: Theme) {
+    init(theme);
+}
+
+/// Re-read the desktop's appearance and apply the current theme on top of it.
+fn refresh() {
+    let desktop = DesktopAppearance::load();
+    let look = Look::resolve(THEME.with(Cell::get), &desktop);
+    let manager = adw::StyleManager::default();
+    // libadwaita's own switch, not GtkSettings' prefer-dark, which it warns
+    // about and ignores.
+    manager.set_color_scheme(look.scheme.color_scheme());
+    // The light sheet only for an explicit "light". Raven Store and Raven
+    // Settings read "auto" the same way (prefer dark, dark Raven Glass), and
+    // the apps have to agree or one desktop shows a light file manager beside
+    // a dark Store.
+    let light = look.scheme == Scheme::Light;
+    set_theme_css(look.css(light));
+
+    GLASS.with(|g| g.set(desktop.transparency));
+    let toplevels = gtk::Window::toplevels();
+    for i in 0..toplevels.n_items() {
+        if let Some(window) = toplevels.item(i).and_downcast::<gtk::Window>() {
+            decorate(&window);
+        }
     }
+}
 
+fn set_theme_css(css: String) {
+    let Some(display) = gtk::gdk::Display::default() else {
+        return;
+    };
     THEME_PROVIDER.with(|cell| {
-        if let Some(old) = cell.borrow_mut().take() {
+        let mut slot = cell.borrow_mut();
+        if slot.as_ref().is_some_and(|(_, current)| *current == css) {
+            return;
+        }
+        if let Some((old, _)) = slot.take() {
             gtk::style_context_remove_provider_for_display(&display, &old);
         }
+        let provider = gtk::CssProvider::new();
+        provider.load_from_string(&css);
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
+        );
+        *slot = Some((provider, css));
+    });
+}
 
-        if !css.is_empty() {
-            let provider = gtk::CssProvider::new();
-            provider.load_from_data(css);
-            gtk::style_context_add_provider_for_display(
-                &display,
-                &provider,
-                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
-            );
-            *cell.borrow_mut() = Some(provider);
+/// Give a window the Raven classes. Glass is the material of a window of its
+/// own; a dialog over one stays opaque, as in the other Raven apps.
+fn decorate(window: &gtk::Window) {
+    window.add_css_class("raven");
+    if GLASS.with(Cell::get) && window.transient_for().is_none() {
+        window.add_css_class("glass");
+    } else {
+        window.remove_css_class("glass");
+    }
+}
+
+/// Decorate every toplevel now and each one created from here on.
+fn decorate_toplevels() {
+    let toplevels = gtk::Window::toplevels();
+    for i in 0..toplevels.n_items() {
+        if let Some(window) = toplevels.item(i).and_downcast::<gtk::Window>() {
+            decorate(&window);
+        }
+    }
+    toplevels.connect_items_changed(|model, position, _removed, added| {
+        for i in position..position + added {
+            let Some(window) = model.item(i).and_downcast::<gtk::Window>() else {
+                continue;
+            };
+            decorate(&window);
+            // A window joins the list while it is still being constructed,
+            // before a dialog's transient-for is set; decide on glass again
+            // once it has been.
+            let weak = window.downgrade();
+            glib::idle_add_local_once(move || {
+                if let Some(window) = weak.upgrade() {
+                    decorate(&window);
+                }
+            });
         }
     });
 }
 
-pub fn load_base_css() {
-    let display = gtk::gdk::Display::default().expect("Could not get default display");
-    let provider = gtk::CssProvider::new();
-    provider.load_from_data(include_str!("../../../data/resources/style.css"));
-    gtk::style_context_add_provider_for_display(
-        &display,
-        &provider,
-        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
+/// Follow `desktop.toml`, so a change made in Raven Settings shows here at
+/// once. The directory is watched rather than the file: the file may not
+/// exist yet, and may be replaced by renaming a new one over it.
+fn watch_desktop() {
+    let path = DesktopAppearance::path();
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return;
+    };
+    let name = name.to_os_string();
+    let monitor = match gio::File::for_path(dir)
+        .monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE)
+    {
+        Ok(monitor) => monitor,
+        Err(e) => {
+            tracing::debug!("Not following {}: {}", path.display(), e);
+            return;
+        }
+    };
+    let pending: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+    monitor.connect_changed(move |_, file, other, event| {
+        if matches!(
+            event,
+            gio::FileMonitorEvent::AttributeChanged
+                | gio::FileMonitorEvent::PreUnmount
+                | gio::FileMonitorEvent::Unmounted
+        ) {
+            return;
+        }
+        let names_desktop = |f: Option<&gio::File>| {
+            f.and_then(|f| f.basename())
+                .is_some_and(|b| b.as_os_str() == name.as_os_str())
+        };
+        if !names_desktop(Some(file)) && !names_desktop(other) {
+            return;
+        }
+        if let Some(id) = pending.borrow_mut().take() {
+            id.remove();
+        }
+        let fired = pending.clone();
+        let id = glib::timeout_add_local_once(DESKTOP_SETTLE, move || {
+            fired.borrow_mut().take();
+            refresh();
+        });
+        *pending.borrow_mut() = Some(id);
+    });
+    DESKTOP_MONITOR.with(|m| *m.borrow_mut() = Some(monitor));
 }
 
 /// Apply the font and icon sizes from the appearance settings.
@@ -92,190 +422,77 @@ pub fn apply_sizes(font_size: u32, icon_size: u32) {
 pub fn icon_sizes(icon_size: u32) -> (u32, u32, u32) {
     let list = (icon_size * 5 / 6).clamp(16, 32);
     let grid = (icon_size * 8 / 3).clamp(32, 128);
-    let preview = (icon_size * 16 / 3).clamp(64, 256);
+    // The preview grid's fallback sits in the 128px square a thumbnail gets;
+    // filling it made a type icon outweigh the photos beside it.
+    let preview = (icon_size * 3).clamp(48, 144);
     (list, grid, preview)
 }
 
 fn size_css(font_size: u32, icon_size: u32) -> String {
     let font_size = font_size.clamp(6, 48);
     let (list, grid, preview) = icon_sizes(icon_size);
-    format!(
+    let mut css = format!(
         "window {{ font-size: {font_size}px; }}\n\
          .data-table {{ font-size: {font_size}px; }}\n\
          .raven-list-icon {{ -gtk-icon-size: {list}px; }}\n\
          .raven-grid-icon {{ -gtk-icon-size: {grid}px; }}\n\
          .raven-preview-icon {{ -gtk-icon-size: {preview}px; }}\n"
-    )
+    );
+    css.push_str(&scaled_font_rules(APP_CSS, font_size));
+    css
 }
 
-fn css_for_theme(theme: Theme) -> &'static str {
-    match theme {
-        Theme::AdwaitaDark | Theme::AdwaitaLight => "",
-        Theme::CatppuccinMocha => CATPPUCCIN_MOCHA_CSS,
-        Theme::CatppuccinLatte => CATPPUCCIN_LATTE_CSS,
-        Theme::Nord => NORD_CSS,
-        Theme::Dracula => DRACULA_CSS,
-        Theme::Frost => FROST_CSS,
-        Theme::RosePine => ROSE_PINE_CSS,
+/// The font size style.css's type sizes are written for.
+const BASE_FONT_SIZE: f64 = 13.0;
+
+/// Every `font-size: Npx` in `css`, re-emitted under its own selectors and
+/// scaled from [`BASE_FONT_SIZE`] to `font_size`.
+///
+/// A label given its own size stops inheriting the window's, so without this
+/// the Appearance font size would only reach the labels style.css leaves
+/// alone. Read from the sheet rather than listed here so the two cannot drift.
+/// Rounded to whole pixels: at a fractional size an ellipsizing label measures
+/// narrower than it draws and cuts its own text short.
+fn scaled_font_rules(css: &str, font_size: u32) -> String {
+    let mut out = String::new();
+    for block in strip_css_comments(css).split('}') {
+        let Some((selectors, body)) = block.split_once('{') else {
+            continue;
+        };
+        for declaration in body.split(';') {
+            let Some((property, value)) = declaration.split_once(':') else {
+                continue;
+            };
+            if property.trim() != "font-size" {
+                continue;
+            }
+            let Some(px) = value
+                .trim()
+                .strip_suffix("px")
+                .and_then(|v| v.trim().parse::<f64>().ok())
+            else {
+                continue;
+            };
+            let scaled = (px * f64::from(font_size) / BASE_FONT_SIZE).round().max(1.0);
+            out.push_str(&format!("{} {{ font-size: {scaled}px; }}\n", selectors.trim()));
+        }
     }
+    out
 }
 
-static CATPPUCCIN_MOCHA_CSS: &str = r#"
-@define-color window_bg_color #1e1e2e;
-@define-color window_fg_color #cdd6f4;
-@define-color headerbar_bg_color #181825;
-@define-color headerbar_fg_color #cdd6f4;
-@define-color card_bg_color #313244;
-@define-color card_fg_color #cdd6f4;
-@define-color view_bg_color #1e1e2e;
-@define-color view_fg_color #cdd6f4;
-@define-color sidebar_bg_color #181825;
-@define-color sidebar_fg_color #cdd6f4;
-@define-color popover_bg_color #313244;
-@define-color popover_fg_color #cdd6f4;
-@define-color accent_color #cba6f7;
-@define-color accent_bg_color #cba6f7;
-@define-color accent_fg_color #1e1e2e;
-@define-color borders #45475a;
-@define-color warning_color #f9e2af;
-@define-color success_color #a6e3a1;
-@define-color error_color #f38ba8;
-"#;
-
-static CATPPUCCIN_LATTE_CSS: &str = r#"
-@define-color window_bg_color #eff1f5;
-@define-color window_fg_color #4c4f69;
-@define-color headerbar_bg_color #e6e9ef;
-@define-color headerbar_fg_color #4c4f69;
-@define-color card_bg_color #ccd0da;
-@define-color card_fg_color #4c4f69;
-@define-color view_bg_color #eff1f5;
-@define-color view_fg_color #4c4f69;
-@define-color sidebar_bg_color #e6e9ef;
-@define-color sidebar_fg_color #4c4f69;
-@define-color popover_bg_color #ccd0da;
-@define-color popover_fg_color #4c4f69;
-@define-color accent_color #8839ef;
-@define-color accent_bg_color #8839ef;
-@define-color accent_fg_color #eff1f5;
-@define-color borders #bcc0cc;
-@define-color warning_color #df8e1d;
-@define-color success_color #40a02b;
-@define-color error_color #d20f39;
-"#;
-
-static NORD_CSS: &str = r#"
-@define-color window_bg_color #2e3440;
-@define-color window_fg_color #eceff4;
-@define-color headerbar_bg_color #3b4252;
-@define-color headerbar_fg_color #eceff4;
-@define-color card_bg_color #3b4252;
-@define-color card_fg_color #eceff4;
-@define-color view_bg_color #2e3440;
-@define-color view_fg_color #eceff4;
-@define-color sidebar_bg_color #3b4252;
-@define-color sidebar_fg_color #d8dee9;
-@define-color popover_bg_color #434c5e;
-@define-color popover_fg_color #eceff4;
-@define-color accent_color #88c0d0;
-@define-color accent_bg_color #88c0d0;
-@define-color accent_fg_color #2e3440;
-@define-color borders #4c566a;
-@define-color warning_color #ebcb8b;
-@define-color success_color #a3be8c;
-@define-color error_color #bf616a;
-"#;
-
-static DRACULA_CSS: &str = r#"
-@define-color window_bg_color #282a36;
-@define-color window_fg_color #f8f8f2;
-@define-color headerbar_bg_color #21222c;
-@define-color headerbar_fg_color #f8f8f2;
-@define-color card_bg_color #44475a;
-@define-color card_fg_color #f8f8f2;
-@define-color view_bg_color #282a36;
-@define-color view_fg_color #f8f8f2;
-@define-color sidebar_bg_color #21222c;
-@define-color sidebar_fg_color #f8f8f2;
-@define-color popover_bg_color #44475a;
-@define-color popover_fg_color #f8f8f2;
-@define-color accent_color #bd93f9;
-@define-color accent_bg_color #bd93f9;
-@define-color accent_fg_color #282a36;
-@define-color borders #6272a4;
-@define-color warning_color #f1fa8c;
-@define-color success_color #50fa7b;
-@define-color error_color #ff5555;
-"#;
-
-static FROST_CSS: &str = r#"
-@define-color window_bg_color rgba(15, 23, 42, 0.95);
-@define-color window_fg_color #e2e8f0;
-@define-color headerbar_bg_color rgba(15, 23, 42, 0.90);
-@define-color headerbar_fg_color #e2e8f0;
-@define-color card_bg_color rgba(30, 58, 95, 0.85);
-@define-color card_fg_color #e2e8f0;
-@define-color view_bg_color rgba(15, 23, 42, 0.92);
-@define-color view_fg_color #e2e8f0;
-@define-color sidebar_bg_color rgba(15, 23, 42, 0.88);
-@define-color sidebar_fg_color #cbd5e1;
-@define-color popover_bg_color rgba(30, 58, 95, 0.90);
-@define-color popover_fg_color #e2e8f0;
-@define-color accent_color #38bdf8;
-@define-color accent_bg_color #38bdf8;
-@define-color accent_fg_color #0f172a;
-@define-color borders rgba(56, 189, 248, 0.3);
-@define-color warning_color #fbbf24;
-@define-color success_color #34d399;
-@define-color error_color #f87171;
-
-headerbar {
-    background: rgba(15, 23, 42, 0.85);
-    border-bottom: 1px solid rgba(56, 189, 248, 0.2);
+fn strip_css_comments(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(start) = rest.find("/*") {
+        out.push_str(&rest[..start]);
+        rest = match rest[start + 2..].find("*/") {
+            Some(end) => &rest[start + 2 + end + 2..],
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    out
 }
-
-.navigation-sidebar {
-    background: rgba(15, 23, 42, 0.80);
-    border-right: 1px solid rgba(56, 189, 248, 0.15);
-}
-
-.tab-bar {
-    background: rgba(15, 23, 42, 0.80);
-    border-bottom: 1px solid rgba(56, 189, 248, 0.2);
-}
-
-.search-bar {
-    background: rgba(30, 58, 95, 0.70);
-    border-bottom: 1px solid rgba(56, 189, 248, 0.2);
-}
-
-.preview-panel {
-    background: rgba(30, 58, 95, 0.60);
-    border-left: 1px solid rgba(56, 189, 248, 0.15);
-}
-"#;
-
-static ROSE_PINE_CSS: &str = r#"
-@define-color window_bg_color #191724;
-@define-color window_fg_color #e0def4;
-@define-color headerbar_bg_color #1f1d2e;
-@define-color headerbar_fg_color #e0def4;
-@define-color card_bg_color #1f1d2e;
-@define-color card_fg_color #e0def4;
-@define-color view_bg_color #191724;
-@define-color view_fg_color #e0def4;
-@define-color sidebar_bg_color #1f1d2e;
-@define-color sidebar_fg_color #908caa;
-@define-color popover_bg_color #26233a;
-@define-color popover_fg_color #e0def4;
-@define-color accent_color #c4a7e7;
-@define-color accent_bg_color #c4a7e7;
-@define-color accent_fg_color #191724;
-@define-color borders #26233a;
-@define-color warning_color #f6c177;
-@define-color success_color #9ccfd8;
-@define-color error_color #eb6f92;
-"#;
 
 #[cfg(test)]
 mod tests {
@@ -283,13 +500,28 @@ mod tests {
 
     #[test]
     fn stock_icon_size_keeps_original_pixel_sizes() {
-        assert_eq!(icon_sizes(24), (20, 64, 128));
+        assert_eq!(icon_sizes(24), (20, 64, 72));
     }
 
     #[test]
     fn icon_sizes_stay_within_bounds() {
-        assert_eq!(icon_sizes(16), (16, 42, 85));
-        assert_eq!(icon_sizes(64), (32, 128, 256));
+        assert_eq!(icon_sizes(16), (16, 42, 48));
+        assert_eq!(icon_sizes(64), (32, 128, 144));
+    }
+
+    /// Each fixed type size in style.css follows the font-size setting.
+    #[test]
+    fn app_type_sizes_scale_with_the_font_size() {
+        let css = "/* a { font-size: 99px; } */\n.a label,\n.b { color: red; font-size: 12px; }\n.c { font-size: 1em; }\n";
+        assert_eq!(scaled_font_rules(css, 13), ".a label,\n.b { font-size: 12px; }\n");
+        assert_eq!(scaled_font_rules(css, 26), ".a label,\n.b { font-size: 24px; }\n");
+        // Whole pixels only.
+        assert_eq!(scaled_font_rules(css, 15), ".a label,\n.b { font-size: 14px; }\n");
+
+        let sizes = size_css(15, 24);
+        assert!(sizes.contains(".status-bar label { font-size: 14px; }"));
+        assert!(sizes.contains("gridview.file-grid > child label { font-size: 14px; }"));
+        assert!(sizes.contains(".sidebar list.navigation-sidebar row label { font-size: 16px; }"));
     }
 
     #[test]
@@ -299,6 +531,60 @@ mod tests {
         assert!(css.contains(".data-table { font-size: 13px; }"));
         assert!(css.contains(".raven-list-icon { -gtk-icon-size: 20px; }"));
         assert!(css.contains(".raven-grid-icon { -gtk-icon-size: 64px; }"));
-        assert!(css.contains(".raven-preview-icon { -gtk-icon-size: 128px; }"));
+        assert!(css.contains(".raven-preview-icon { -gtk-icon-size: 72px; }"));
+    }
+
+    #[test]
+    fn raven_follows_the_desktop() {
+        let desktop = DesktopAppearance {
+            theme_mode: DesktopThemeMode::Light,
+            accent: "#F7768E".to_string(),
+            transparency: false,
+        };
+        let look = Look::resolve(Theme::Raven, &desktop);
+        assert_eq!(look.scheme, Scheme::Light);
+        assert_eq!(look.accent, "#F7768E");
+        assert!(look.palette.is_none());
+        let auto = DesktopAppearance {
+            theme_mode: DesktopThemeMode::Auto,
+            ..desktop
+        };
+        assert_eq!(Look::resolve(Theme::Raven, &auto).scheme, Scheme::System);
+    }
+
+    #[test]
+    fn palette_themes_ignore_the_desktop_colours() {
+        let desktop = DesktopAppearance::default();
+        let latte = Look::resolve(Theme::CatppuccinLatte, &desktop);
+        assert_eq!(latte.scheme, Scheme::Light);
+        assert_eq!(latte.accent, "#8839ef");
+        let nord = Look::resolve(Theme::Nord, &desktop);
+        assert_eq!(nord.scheme, Scheme::Dark);
+    }
+
+    #[test]
+    fn theme_css_layers_accent_light_sheet_and_palette() {
+        let desktop = DesktopAppearance::default();
+        let dark = Look::resolve(Theme::Raven, &desktop).css(false);
+        assert!(dark.starts_with("@define-color accent_bg_color #7AA2F7;"));
+        assert!(!dark.contains("Raven Glass, light"));
+
+        let light = Look::resolve(Theme::AdwaitaLight, &desktop).css(true);
+        let light_sheet = light.find("Raven Glass, light").expect("light sheet");
+        let app_rules = light.find("Raven File Manager").expect("app rules repeated");
+        assert!(light_sheet < app_rules);
+
+        let nord = Look::resolve(Theme::Nord, &desktop).css(false);
+        assert!(nord.contains("@define-color window_bg_color #2e3440;"));
+        assert!(nord.contains("window.raven.glass { background-color: alpha(#2e3440, 0.85); }"));
+    }
+
+    #[test]
+    fn every_theme_resolves() {
+        let desktop = DesktopAppearance::default();
+        for theme in Theme::ALL {
+            let look = Look::resolve(*theme, &desktop);
+            assert!(raven_core::config::is_hex_colour(&look.accent), "{theme:?}");
+        }
     }
 }

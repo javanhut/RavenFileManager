@@ -17,6 +17,7 @@ use crate::widgets::file_list::format_size;
 pub struct Sidebar {
     pub widget: gtk::Box,
     bookmarks_list: gtk::ListBox,
+    tags_label: gtk::Label,
     tags_list: gtk::ListBox,
     volume_list: gtk::ListBox,
     volume_monitor: gio::VolumeMonitor,
@@ -32,6 +33,8 @@ pub struct Sidebar {
     remote_rows: RefCell<HashMap<String, gtk::ListBoxRow>>,
     /// What "Connect to Server" does; the window supplies the dialog.
     connect_handler: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+    /// What the "Recent" row does; the window supplies the listing.
+    recent_handler: Rc<RefCell<Option<Box<dyn Fn()>>>>,
 }
 
 impl Sidebar {
@@ -41,17 +44,12 @@ impl Sidebar {
         pane: PaneResolver,
     ) -> Self {
         let widget = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        widget.set_width_request(200);
-        widget.add_css_class("navigation-sidebar");
+        // The scrolled window around this carries Raven's `.sidebar` and its
+        // padding; this is only the column of sections.
+        widget.set_width_request(184);
 
         // Bookmarks section
-        let bookmarks_label = gtk::Label::new(Some("Places"));
-        bookmarks_label.set_halign(gtk::Align::Start);
-        bookmarks_label.add_css_class("heading");
-        bookmarks_label.set_margin_top(12);
-        bookmarks_label.set_margin_start(12);
-        bookmarks_label.set_margin_bottom(6);
-        widget.append(&bookmarks_label);
+        widget.append(&section_heading("Places", true));
 
         let bookmarks_list = gtk::ListBox::new();
         bookmarks_list.set_selection_mode(gtk::SelectionMode::Single);
@@ -70,9 +68,12 @@ impl Sidebar {
         // --- Drop target on bookmarks_list: drag folders to pin as bookmarks ---
         {
             let pin_drop_target = gtk::DropTarget::new(
-                gtk::glib::types::Type::STRING,
+                gtk::glib::types::Type::INVALID,
                 gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE,
             );
+            // Other applications offer a file list; Raven's listings also a URI string.
+            pin_drop_target
+                .set_types(&[gtk::gdk::FileList::static_type(), gtk::glib::Type::STRING]);
 
             let bl_for_enter = bookmarks_list.clone();
             let bl_for_leave = bookmarks_list.clone();
@@ -89,15 +90,8 @@ impl Sidebar {
             let cmd_for_pin = command_tx.clone();
             let pane_for_pin = pane.clone();
             pin_drop_target.connect_drop(move |_target, value, _x, _y| {
-                if let Ok(uri_list) = value.get::<String>() {
-                    let paths: Vec<PathBuf> = uri_list
-                        .lines()
-                        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-                        .filter_map(|line| {
-                            let line = line.trim().trim_end_matches('\r');
-                            line.strip_prefix("file://").map(PathBuf::from)
-                        })
-                        .collect();
+                {
+                    let paths: Vec<PathBuf> = crate::dnd::paths_from_value(value);
 
                     let mut pinned_any = false;
                     for p in paths {
@@ -132,9 +126,8 @@ impl Sidebar {
                             }
                         }
                     }
-                    return pinned_any;
+                    pinned_any
                 }
-                false
             });
             bookmarks_list.add_controller(pin_drop_target);
         }
@@ -148,14 +141,39 @@ impl Sidebar {
         trash_list.set_selection_mode(gtk::SelectionMode::None);
         trash_list.add_css_class("navigation-sidebar");
 
+        // Recent files: not a folder, so the window lists them itself.
+        let recent_handler: Rc<RefCell<Option<Box<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+        {
+            let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            hbox.set_margin_start(0);
+            hbox.set_margin_end(0);
+            hbox.set_margin_top(1);
+            hbox.set_margin_bottom(1);
+            hbox.append(&nav_tile(crate::widgets::pane_view::RECENT_ICON));
+            let lbl = gtk::Label::new(Some("Recent"));
+            lbl.set_halign(gtk::Align::Start);
+            hbox.append(&lbl);
+            let row = gtk::ListBoxRow::new();
+            row.set_child(Some(&hbox));
+
+            let handler = recent_handler.clone();
+            let gesture = gtk::GestureClick::new();
+            gesture.set_button(1);
+            gesture.connect_released(move |_, _, _, _| {
+                if let Some(cb) = handler.borrow().as_ref() {
+                    cb();
+                }
+            });
+            row.add_controller(gesture);
+            trash_list.append(&row);
+        }
+
         let trash_hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        trash_hbox.set_margin_start(8);
-        trash_hbox.set_margin_end(8);
-        trash_hbox.set_margin_top(4);
-        trash_hbox.set_margin_bottom(4);
-        let trash_icon = gtk::Image::from_icon_name("user-trash-symbolic");
-        trash_icon.set_pixel_size(16);
-        trash_hbox.append(&trash_icon);
+        trash_hbox.set_margin_start(0);
+        trash_hbox.set_margin_end(0);
+        trash_hbox.set_margin_top(1);
+        trash_hbox.set_margin_bottom(1);
+        trash_hbox.append(&nav_tile("user-trash-symbolic"));
         let trash_lbl = gtk::Label::new(Some("Trash"));
         trash_lbl.set_halign(gtk::Align::Start);
         trash_hbox.append(&trash_lbl);
@@ -180,19 +198,9 @@ impl Sidebar {
         trash_list.append(&trash_row);
         widget.append(&trash_list);
 
-        // Separator
-        let sep = gtk::Separator::new(gtk::Orientation::Horizontal);
-        sep.set_margin_top(12);
-        sep.set_margin_bottom(12);
-        widget.append(&sep);
-
-        // Volumes section
-        let volumes_label = gtk::Label::new(Some("Devices"));
-        volumes_label.set_halign(gtk::Align::Start);
-        volumes_label.add_css_class("heading");
-        volumes_label.set_margin_start(12);
-        volumes_label.set_margin_bottom(6);
-        widget.append(&volumes_label);
+        // Volumes section. Sections are parted by their headings and air,
+        // not by rules.
+        widget.append(&section_heading("Devices", false));
 
         let volume_list = gtk::ListBox::new();
         volume_list.set_selection_mode(gtk::SelectionMode::Single);
@@ -205,19 +213,8 @@ impl Sidebar {
 
         widget.append(&volume_list);
 
-        // Separator before network
-        let sep_net = gtk::Separator::new(gtk::Orientation::Horizontal);
-        sep_net.set_margin_top(12);
-        sep_net.set_margin_bottom(12);
-        widget.append(&sep_net);
-
         // Network section
-        let network_label = gtk::Label::new(Some("Network"));
-        network_label.set_halign(gtk::Align::Start);
-        network_label.add_css_class("heading");
-        network_label.set_margin_start(12);
-        network_label.set_margin_bottom(6);
-        widget.append(&network_label);
+        widget.append(&section_heading("Network", false));
 
         let remote_list = gtk::ListBox::new();
         remote_list.set_selection_mode(gtk::SelectionMode::None);
@@ -226,13 +223,11 @@ impl Sidebar {
         let connect_handler: Rc<RefCell<Option<Box<dyn Fn()>>>> = Rc::new(RefCell::new(None));
         {
             let connect_hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-            connect_hbox.set_margin_start(8);
-            connect_hbox.set_margin_end(8);
-            connect_hbox.set_margin_top(4);
-            connect_hbox.set_margin_bottom(4);
-            let icon = gtk::Image::from_icon_name("network-server-symbolic");
-            icon.set_pixel_size(16);
-            connect_hbox.append(&icon);
+            connect_hbox.set_margin_start(0);
+            connect_hbox.set_margin_end(0);
+            connect_hbox.set_margin_top(1);
+            connect_hbox.set_margin_bottom(1);
+            connect_hbox.append(&nav_tile("network-server-symbolic"));
             let lbl = gtk::Label::new(Some("Connect to Server..."));
             lbl.set_halign(gtk::Align::Start);
             connect_hbox.append(&lbl);
@@ -253,18 +248,9 @@ impl Sidebar {
         }
         widget.append(&remote_list);
 
-        // Separator before tags
-        let sep2 = gtk::Separator::new(gtk::Orientation::Horizontal);
-        sep2.set_margin_top(12);
-        sep2.set_margin_bottom(12);
-        widget.append(&sep2);
-
-        // Tags section
-        let tags_label = gtk::Label::new(Some("Tags"));
-        tags_label.set_halign(gtk::Align::Start);
-        tags_label.add_css_class("heading");
-        tags_label.set_margin_start(12);
-        tags_label.set_margin_bottom(6);
+        // Tags section, its heading shown only while there are tags to list.
+        let tags_label = section_heading("Tags", false);
+        tags_label.set_visible(false);
         widget.append(&tags_label);
 
         let tags_list = gtk::ListBox::new();
@@ -275,6 +261,7 @@ impl Sidebar {
         Self {
             widget,
             bookmarks_list,
+            tags_label,
             tags_list,
             volume_list,
             volume_monitor,
@@ -285,7 +272,13 @@ impl Sidebar {
             remote_list,
             remote_rows: RefCell::new(HashMap::new()),
             connect_handler,
+            recent_handler,
         }
+    }
+
+    /// Set what the "Recent" row shows.
+    pub fn set_recent_handler(&self, cb: impl Fn() + 'static) {
+        *self.recent_handler.borrow_mut() = Some(Box::new(cb));
     }
 
     /// Set what the "Connect to Server" row opens.
@@ -304,12 +297,11 @@ impl Sidebar {
 
         let open_btn = gtk::Button::new();
         open_btn.add_css_class("flat");
+        open_btn.add_css_class("remote");
         open_btn.set_hexpand(true);
         open_btn.set_tooltip_text(Some(&path.to_string()));
         let open_content = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        let icon = gtk::Image::from_icon_name("folder-remote-symbolic");
-        icon.set_pixel_size(16);
-        open_content.append(&icon);
+        open_content.append(&nav_tile("folder-remote-symbolic"));
         let lbl = gtk::Label::new(Some(label));
         lbl.set_halign(gtk::Align::Start);
         lbl.set_hexpand(true);
@@ -350,6 +342,11 @@ impl Sidebar {
         let position = self.remote_rows.borrow().len() as i32;
         self.remote_list.insert(&row, position);
         self.remote_rows.borrow_mut().insert(id.to_string(), row);
+    }
+
+    /// The ids of the connections currently listed.
+    pub fn remote_ids(&self) -> Vec<String> {
+        self.remote_rows.borrow().keys().cloned().collect()
     }
 
     /// Drop the row for a connection that is gone.
@@ -466,15 +463,13 @@ impl Sidebar {
         pane: &PaneResolver,
     ) -> gtk::ListBoxRow {
         let vbox = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        vbox.set_margin_start(8);
-        vbox.set_margin_end(8);
-        vbox.set_margin_top(4);
-        vbox.set_margin_bottom(4);
+        vbox.set_margin_start(0);
+        vbox.set_margin_end(0);
+        vbox.set_margin_top(1);
+        vbox.set_margin_bottom(1);
 
         let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        let icon = gtk::Image::from_icon_name(icon_name);
-        icon.set_pixel_size(16);
-        hbox.append(&icon);
+        hbox.append(&nav_tile(icon_name));
 
         let lbl = gtk::Label::new(Some(name));
         lbl.set_halign(gtk::Align::Start);
@@ -495,7 +490,6 @@ impl Sidebar {
                     format_size(total)
                 )));
                 space_label.set_halign(gtk::Align::Start);
-                space_label.add_css_class("dim-label");
                 space_label.add_css_class("caption");
                 vbox.append(&space_label);
 
@@ -503,7 +497,7 @@ impl Sidebar {
                 level_bar.set_min_value(0.0);
                 level_bar.set_max_value(1.0);
                 level_bar.set_value(fraction);
-                level_bar.set_height_request(4);
+                level_bar.set_height_request(3);
                 level_bar.add_offset_value("low", 0.6);
                 level_bar.add_offset_value("high", 0.8);
                 level_bar.add_offset_value("full", 0.95);
@@ -585,21 +579,21 @@ impl Sidebar {
     /// Create a dimmed row for unmounted volumes with click-to-mount.
     fn create_unmounted_volume_row(name: &str, volume: &gio::Volume) -> gtk::ListBoxRow {
         let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        hbox.set_margin_start(8);
-        hbox.set_margin_end(8);
-        hbox.set_margin_top(4);
-        hbox.set_margin_bottom(4);
+        hbox.set_margin_start(0);
+        hbox.set_margin_end(0);
+        hbox.set_margin_top(1);
+        hbox.set_margin_bottom(1);
 
-        let icon = gtk::Image::from_icon_name("drive-harddisk-symbolic");
-        icon.set_pixel_size(16);
-        icon.set_opacity(0.5);
-        hbox.append(&icon);
+        // The tile and the label are both dimmed by colour (`.unmounted` in
+        // style.css), not opacity, so neither stacks with anything else that
+        // dims.
+        let tile = nav_tile("drive-harddisk-symbolic");
+        hbox.append(&tile);
 
         let lbl = gtk::Label::new(Some(&format!("{} (unmounted)", name)));
         lbl.set_halign(gtk::Align::Start);
         lbl.set_hexpand(true);
         lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        lbl.set_opacity(0.5);
         hbox.append(&lbl);
 
         let mount_btn = gtk::Button::from_icon_name("media-mount-symbolic");
@@ -625,6 +619,7 @@ impl Sidebar {
         hbox.append(&mount_btn);
 
         let row = gtk::ListBoxRow::new();
+        row.add_css_class("unmounted");
         row.set_child(Some(&hbox));
 
         // Click on the row also triggers mount
@@ -656,20 +651,20 @@ impl Sidebar {
         while let Some(child) = self.tags_list.first_child() {
             self.tags_list.remove(&child);
         }
+        self.tags_label
+            .set_visible(counts.iter().any(|(_, count)| *count > 0));
 
         for (tag_name, count) in counts {
             if *count == 0 {
                 continue;
             }
             let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-            hbox.set_margin_start(8);
-            hbox.set_margin_end(8);
-            hbox.set_margin_top(4);
-            hbox.set_margin_bottom(4);
+            hbox.set_margin_start(0);
+            hbox.set_margin_end(0);
+            hbox.set_margin_top(1);
+            hbox.set_margin_bottom(1);
 
-            let icon = gtk::Image::from_icon_name("tag-symbolic");
-            icon.set_pixel_size(16);
-            hbox.append(&icon);
+            hbox.append(&nav_tile("tag-symbolic"));
 
             let lbl = gtk::Label::new(Some(tag_name));
             lbl.set_halign(gtk::Align::Start);
@@ -678,7 +673,7 @@ impl Sidebar {
             hbox.append(&lbl);
 
             let count_lbl = gtk::Label::new(Some(&count.to_string()));
-            count_lbl.add_css_class("dim-label");
+            count_lbl.add_css_class("count");
             hbox.append(&count_lbl);
 
             let row = gtk::ListBoxRow::new();
@@ -778,14 +773,12 @@ impl Sidebar {
             .unwrap_or("folder-symbolic");
 
         let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        hbox.set_margin_start(8);
-        hbox.set_margin_end(8);
-        hbox.set_margin_top(4);
-        hbox.set_margin_bottom(4);
+        hbox.set_margin_start(0);
+        hbox.set_margin_end(0);
+        hbox.set_margin_top(1);
+        hbox.set_margin_bottom(1);
 
-        let icon = gtk::Image::from_icon_name(icon_name);
-        icon.set_pixel_size(16);
-        hbox.append(&icon);
+        hbox.append(&nav_tile(icon_name));
 
         let lbl = gtk::Label::new(Some(&bookmark.name));
         lbl.set_halign(gtk::Align::Start);
@@ -825,46 +818,14 @@ impl Sidebar {
         row.add_controller(right_click);
 
         // Drop target: accept files dropped onto this bookmark
-        let drop_target = gtk::DropTarget::new(
-            gtk::glib::types::Type::STRING,
-            gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE,
-        );
-        let drop_dest_path = bookmark.path.clone();
+        let drop_dest = RavenPath::local(PathBuf::from(&bookmark.path));
+        let drop_target = {
+            let dest = drop_dest.clone();
+            crate::dnd::file_drop_target(Some("drop-highlight"), move || Some(dest.clone()))
+        };
         let cmd_tx_drop = command_tx.clone();
-        let row_for_enter = row.clone();
-        let row_for_leave = row.clone();
-
-        drop_target.connect_enter(move |_target, _x, _y| {
-            row_for_enter.add_css_class("drop-highlight");
-            gtk::gdk::DragAction::MOVE
-        });
-        drop_target.connect_leave(move |_target| {
-            row_for_leave.remove_css_class("drop-highlight");
-        });
-        drop_target.connect_drop(move |_target, value, _x, _y| {
-            if let Ok(uri_list) = value.get::<String>() {
-                let sources: Vec<RavenPath> = uri_list
-                    .lines()
-                    .filter(|line| !line.is_empty() && !line.starts_with('#'))
-                    .filter_map(|line| {
-                        let line = line.trim().trim_end_matches('\r');
-                        line.strip_prefix("file://")
-                            .map(|p| RavenPath::local(PathBuf::from(p)))
-                    })
-                    .collect();
-
-                if sources.is_empty() {
-                    return false;
-                }
-
-                let destination = RavenPath::local(PathBuf::from(&drop_dest_path));
-                let _ = cmd_tx_drop.send(AppCommand::MoveFiles {
-                    sources,
-                    destination,
-                });
-                return true;
-            }
-            false
+        drop_target.connect_drop(move |target, value, _x, _y| {
+            crate::dnd::perform_drop(target, value, &drop_dest, &cmd_tx_drop)
         });
         row.add_controller(drop_target);
 
@@ -906,6 +867,59 @@ impl Sidebar {
         row.insert_action_group("sidebar", Some(&action_group));
 
         popover
+    }
+}
+
+/// A section heading in Raven's eyebrow style: small, heavy, tracked out and
+/// in capitals, so it labels the rows under it without competing with them.
+pub fn section_heading(text: &str, first: bool) -> gtk::Label {
+    let label = gtk::Label::new(Some(&text.to_uppercase()));
+    label.set_halign(gtk::Align::Start);
+    label.add_css_class("eyebrow");
+    if first {
+        label.add_css_class("first");
+    }
+    label
+}
+
+/// An icon on the tinted tile the Raven apps put beside sidebar rows. The
+/// tint says what kind of place a row is and never follows the accent, which
+/// is kept for the selected row.
+pub fn nav_tile(icon_name: &str) -> gtk::Box {
+    let tile = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    tile.add_css_class("nav-icon");
+    tile.add_css_class(nav_tint(icon_name));
+    tile.set_halign(gtk::Align::Center);
+    tile.set_valign(gtk::Align::Center);
+    let icon = gtk::Image::from_icon_name(icon_name);
+    icon.set_halign(gtk::Align::Center);
+    icon.set_valign(gtk::Align::Center);
+    icon.set_vexpand(true);
+    tile.append(&icon);
+    tile
+}
+
+/// The `.nav-icon` tint for a place, by its icon.
+fn nav_tint(icon_name: &str) -> &'static str {
+    match icon_name {
+        "user-home-symbolic" => "blue",
+        "user-desktop-symbolic" => "indigo",
+        "folder-documents-symbolic" => "orange",
+        "folder-download-symbolic" => "green",
+        "folder-music-symbolic" => "pink",
+        "folder-pictures-symbolic" => "purple",
+        "folder-videos-symbolic" => "red",
+        "document-open-recent-symbolic" => "teal",
+        "user-trash-symbolic" => "graphite",
+        "network-server-symbolic" | "folder-remote-symbolic" => "cyan",
+        "tag-symbolic" => "yellow",
+        name if name.starts_with("computer")
+            || name.starts_with("drive-")
+            || name.starts_with("media-") =>
+        {
+            "gray"
+        }
+        _ => "blue",
     }
 }
 

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -8,6 +8,9 @@ use raven_core::commands::AppCommand;
 use raven_core::entry::{EntryKind, EntryMetadata, FileEntry};
 use raven_core::events::{AppEvent, NotificationLevel};
 use raven_core::path::RavenPath;
+
+use crate::actions::ActionRegistry;
+use crate::selection::SharedSelection;
 
 /// The host API exposed to plugins.
 /// Plugins call these methods to interact with the file manager.
@@ -40,15 +43,18 @@ pub trait PluginApi: Send + Sync {
 /// The API plugins get in the running file manager: navigation and file
 /// operations go to the backend as commands, notifications to the window as
 /// events, and listings are read straight from the local filesystem.
+///
+/// One instance is shared by every plugin, so it cannot tell who is calling;
+/// the manager hands each plugin a [`ScopedPluginApi`] over it instead, which
+/// is what makes action registration possible.
 pub struct ChannelPluginApi {
     command_tx: UnboundedSender<AppCommand>,
     event_tx: UnboundedSender<AppEvent>,
     /// The pane the user is looking at, kept current by the backend.
     current_pane: Arc<AtomicU32>,
     config_dir: PathBuf,
-    /// Actions plugins registered, as (name, label). Shown nowhere yet;
-    /// kept so a plugin's registration is not silently lost.
-    pub actions: Mutex<Vec<(String, String)>>,
+    /// The active pane's selection, published by the window.
+    selection: SharedSelection,
 }
 
 impl ChannelPluginApi {
@@ -57,13 +63,14 @@ impl ChannelPluginApi {
         event_tx: UnboundedSender<AppEvent>,
         current_pane: Arc<AtomicU32>,
         config_dir: PathBuf,
+        selection: SharedSelection,
     ) -> Self {
         Self {
             command_tx,
             event_tx,
             current_pane,
             config_dir,
-            actions: Mutex::new(Vec::new()),
+            selection,
         }
     }
 
@@ -107,9 +114,7 @@ impl PluginApi for ChannelPluginApi {
     }
 
     fn get_selection(&self) -> Result<Vec<String>, String> {
-        // The selection lives in the window and is not mirrored to the
-        // backend; plugins get it as hook arguments instead.
-        Err("the selection is not available through the plugin API".to_string())
+        Ok(self.selection.get())
     }
 
     fn navigate(&self, path: &str) -> Result<(), String> {
@@ -139,12 +144,9 @@ impl PluginApi for ChannelPluginApi {
             .map_err(|_| "the file manager is shutting down".to_string())
     }
 
-    fn register_action(&self, name: &str, label: &str) -> Result<(), String> {
-        self.actions
-            .lock()
-            .map_err(|e| format!("Lock error: {}", e))?
-            .push((name.to_string(), label.to_string()));
-        Ok(())
+    fn register_action(&self, _name: &str, _label: &str) -> Result<(), String> {
+        // Without an owner the action could be shown but never run.
+        Err("actions can only be registered by a loaded plugin".to_string())
     }
 
     fn send_notification(&self, title: &str, body: &str) -> Result<(), String> {
@@ -163,6 +165,63 @@ impl PluginApi for ChannelPluginApi {
             "plugins_dir" => Some(self.config_dir.join("plugins").to_string_lossy().to_string()),
             _ => None,
         })
+    }
+}
+
+/// The API as one plugin sees it: everything goes to the shared API, except
+/// that registered actions are recorded against this plugin so choosing one
+/// runs the plugin that asked for it.
+pub struct ScopedPluginApi {
+    plugin_id: String,
+    inner: Arc<dyn PluginApi>,
+    registry: ActionRegistry,
+}
+
+impl ScopedPluginApi {
+    pub fn new(plugin_id: String, inner: Arc<dyn PluginApi>, registry: ActionRegistry) -> Self {
+        Self {
+            plugin_id,
+            inner,
+            registry,
+        }
+    }
+
+    pub fn plugin_id(&self) -> &str {
+        &self.plugin_id
+    }
+}
+
+impl PluginApi for ScopedPluginApi {
+    fn list_dir(&self, path: &str) -> Result<Vec<FileEntry>, String> {
+        self.inner.list_dir(path)
+    }
+
+    fn get_selection(&self) -> Result<Vec<String>, String> {
+        self.inner.get_selection()
+    }
+
+    fn navigate(&self, path: &str) -> Result<(), String> {
+        self.inner.navigate(path)
+    }
+
+    fn copy_files(&self, sources: &[String], dest: &str) -> Result<(), String> {
+        self.inner.copy_files(sources, dest)
+    }
+
+    fn move_files(&self, sources: &[String], dest: &str) -> Result<(), String> {
+        self.inner.move_files(sources, dest)
+    }
+
+    fn register_action(&self, name: &str, label: &str) -> Result<(), String> {
+        self.registry.register(&self.plugin_id, name, label)
+    }
+
+    fn send_notification(&self, title: &str, body: &str) -> Result<(), String> {
+        self.inner.send_notification(title, body)
+    }
+
+    fn get_config(&self, key: &str) -> Result<Option<String>, String> {
+        self.inner.get_config(key)
     }
 }
 
@@ -233,12 +292,23 @@ impl PluginApi for MockPluginApi {
 mod tests {
     use super::*;
 
+    fn channel_api(
+        selection: SharedSelection,
+    ) -> (
+        ChannelPluginApi,
+        tokio::sync::mpsc::UnboundedReceiver<AppCommand>,
+        tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+    ) {
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (evt_tx, evt_rx) = tokio::sync::mpsc::unbounded_channel();
+        let pane = Arc::new(AtomicU32::new(7));
+        let api = ChannelPluginApi::new(cmd_tx, evt_tx, pane, PathBuf::from("/cfg"), selection);
+        (api, cmd_rx, evt_rx)
+    }
+
     #[test]
     fn channel_api_forwards_navigation_and_notifications() {
-        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (evt_tx, mut evt_rx) = tokio::sync::mpsc::unbounded_channel();
-        let pane = Arc::new(AtomicU32::new(7));
-        let api = ChannelPluginApi::new(cmd_tx, evt_tx, pane, PathBuf::from("/cfg"));
+        let (api, mut cmd_rx, mut evt_rx) = channel_api(SharedSelection::new());
 
         api.navigate("/tmp").unwrap();
         match cmd_rx.try_recv().unwrap() {
@@ -259,8 +329,48 @@ mod tests {
         }
 
         assert_eq!(api.get_config("config_dir").unwrap().as_deref(), Some("/cfg"));
-        assert!(api.get_selection().is_err());
+        assert!(api.get_selection().unwrap().is_empty());
         assert!(api.list_dir("/definitely/not/here").is_err());
+    }
+
+    #[test]
+    fn channel_api_reads_the_published_selection() {
+        let selection = SharedSelection::new();
+        let (api, _cmd, _evt) = channel_api(selection.clone());
+
+        selection.set(vec!["/home/u/a.txt".into(), "/home/u/b".into()]);
+        assert_eq!(
+            api.get_selection().unwrap(),
+            vec!["/home/u/a.txt".to_string(), "/home/u/b".to_string()]
+        );
+
+        // A pane switch publishes the other pane's selection.
+        selection.set(Vec::new());
+        assert!(api.get_selection().unwrap().is_empty());
+    }
+
+    #[test]
+    fn unscoped_registration_is_refused() {
+        let (api, _cmd, _evt) = channel_api(SharedSelection::new());
+        assert!(api.register_action("x", "X").is_err());
+    }
+
+    #[test]
+    fn scoped_api_records_the_owner_and_delegates_the_rest() {
+        let selection = SharedSelection::new();
+        let (channel, mut cmd_rx, _evt) = channel_api(selection.clone());
+        let registry = ActionRegistry::new();
+        let scoped = ScopedPluginApi::new("zipper".into(), Arc::new(channel), registry.clone());
+
+        scoped.register_action("zip", "Compress").unwrap();
+        assert!(registry.contains("zipper", "zip"));
+        assert_eq!(scoped.plugin_id(), "zipper");
+
+        selection.set(vec!["/f".into()]);
+        assert_eq!(scoped.get_selection().unwrap(), vec!["/f".to_string()]);
+
+        scoped.navigate("/srv").unwrap();
+        assert!(matches!(cmd_rx.try_recv().unwrap(), AppCommand::Navigate { .. }));
     }
 
     #[test]

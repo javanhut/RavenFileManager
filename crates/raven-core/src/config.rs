@@ -112,8 +112,16 @@ impl Default for GeneralConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The colour scheme. Every theme is drawn in Raven Glass -- the material,
+/// radii and type shared by the Raven apps -- and differs only in accent,
+/// light or dark, and the tint of its surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 pub enum Theme {
+    /// Accent, light or dark, and transparency as set for the whole desktop
+    /// in Raven Settings (`desktop.toml`), so the file manager matches the
+    /// other Raven apps and follows changes live.
+    #[default]
+    Raven,
     AdwaitaDark,
     AdwaitaLight,
     CatppuccinMocha,
@@ -124,14 +132,25 @@ pub enum Theme {
     RosePine,
 }
 
-impl Default for Theme {
-    fn default() -> Self {
-        Self::CatppuccinMocha
+/// A theme name this build does not know (one added by a newer build, or
+/// removed since) reads as the default instead of failing. `AppConfig::load`
+/// falls back to defaults for the whole file on any parse error, so a strict
+/// enum here would cost bookmarks, keybindings and every other setting for
+/// the sake of one colour choice.
+impl<'de> Deserialize<'de> for Theme {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        Ok(Theme::ALL
+            .iter()
+            .copied()
+            .find(|theme| format!("{theme:?}") == name)
+            .unwrap_or_default())
     }
 }
 
 impl Theme {
     pub const ALL: &'static [Theme] = &[
+        Theme::Raven,
         Theme::AdwaitaDark,
         Theme::AdwaitaLight,
         Theme::CatppuccinMocha,
@@ -144,6 +163,7 @@ impl Theme {
 
     pub fn display_name(&self) -> &'static str {
         match self {
+            Theme::Raven => "Raven (follows desktop)",
             Theme::AdwaitaDark => "Adwaita Dark",
             Theme::AdwaitaLight => "Adwaita Light",
             Theme::CatppuccinMocha => "Catppuccin Mocha",
@@ -178,10 +198,121 @@ pub struct AppearanceConfig {
     pub show_sidebar: bool,
     pub sidebar_width: i32,
     pub preview_panel_width: i32,
+    /// Whether the preview panel was open when last toggled. Defaulted so
+    /// config files written before it existed still load.
+    #[serde(default)]
+    pub preview_panel_visible: bool,
     #[serde(default)]
     pub theme: Theme,
     #[serde(default)]
     pub view_mode: ViewMode,
+    /// Which change of look this config has been brought through; see
+    /// [`AppearanceConfig::migrate_theme_style`]. Missing in files written
+    /// before it existed, which reads as 0.
+    #[serde(default)]
+    pub theme_style_version: u32,
+}
+
+/// The current look. Version 1 is Raven Glass: every config from before it
+/// is switched to [`Theme::Raven`] once, after which a theme picked in the
+/// settings sticks.
+pub const THEME_STYLE_VERSION: u32 = 1;
+
+impl AppearanceConfig {
+    /// Bring a config from before the current look up to it. Returns whether
+    /// anything changed, so the caller knows to save.
+    pub fn migrate_theme_style(&mut self) -> bool {
+        if self.theme_style_version >= THEME_STYLE_VERSION {
+            return false;
+        }
+        self.theme = Theme::Raven;
+        self.theme_style_version = THEME_STYLE_VERSION;
+        true
+    }
+}
+
+/// The accent Raven uses when the desktop names none, or names one that is
+/// not a colour.
+pub const DEFAULT_ACCENT: &str = "#7AA2F7";
+
+/// Light or dark, as the desktop asks for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DesktopThemeMode {
+    Light,
+    #[default]
+    Dark,
+    /// Whatever the system prefers.
+    Auto,
+}
+
+/// The look the whole desktop is set to, from the `[appearance]` table of
+/// `desktop.toml`. Raven Settings owns that file; it is only read here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesktopAppearance {
+    pub theme_mode: DesktopThemeMode,
+    /// A `#RRGGBB` colour.
+    pub accent: String,
+    /// Whether windows are translucent glass.
+    pub transparency: bool,
+}
+
+impl Default for DesktopAppearance {
+    fn default() -> Self {
+        Self {
+            theme_mode: DesktopThemeMode::Dark,
+            accent: DEFAULT_ACCENT.to_string(),
+            transparency: true,
+        }
+    }
+}
+
+impl DesktopAppearance {
+    pub fn path() -> PathBuf {
+        AppConfig::config_dir().join("desktop.toml")
+    }
+
+    /// The desktop's appearance, or the defaults when there is no
+    /// `desktop.toml` or it cannot be read.
+    pub fn load() -> Self {
+        std::fs::read_to_string(Self::path())
+            .map(|text| Self::parse(&text))
+            .unwrap_or_default()
+    }
+
+    /// Read the three keys that matter here, each on its own: Settings keeps
+    /// many more in the file, and one key of an unexpected shape should cost
+    /// only that key, not the rest. A file that is not TOML gives the defaults.
+    pub fn parse(text: &str) -> Self {
+        let mut appearance = Self::default();
+        let Ok(table) = text.parse::<toml::Table>() else {
+            return appearance;
+        };
+        let Some(section) = table.get("appearance").and_then(|v| v.as_table()) else {
+            return appearance;
+        };
+        match section.get("theme_mode").and_then(|v| v.as_str()) {
+            Some("light") => appearance.theme_mode = DesktopThemeMode::Light,
+            Some("auto") => appearance.theme_mode = DesktopThemeMode::Auto,
+            _ => {}
+        }
+        if let Some(accent) = section
+            .get("accent")
+            .and_then(|v| v.as_str())
+            .filter(|a| is_hex_colour(a))
+        {
+            appearance.accent = accent.to_string();
+        }
+        if let Some(transparency) = section.get("transparency").and_then(|v| v.as_bool()) {
+            appearance.transparency = transparency;
+        }
+        appearance
+    }
+}
+
+/// Whether `s` is a `#RRGGBB` colour, the only form an accent is written in
+/// and the only form safe to put into a stylesheet.
+pub fn is_hex_colour(s: &str) -> bool {
+    s.len() == 7 && s.starts_with('#') && s[1..].chars().all(|c| c.is_ascii_hexdigit())
 }
 
 impl Default for AppearanceConfig {
@@ -194,8 +325,10 @@ impl Default for AppearanceConfig {
             show_sidebar: true,
             sidebar_width: 200,
             preview_panel_width: 300,
+            preview_panel_visible: false,
             theme: Theme::default(),
             view_mode: ViewMode::default(),
+            theme_style_version: THEME_STYLE_VERSION,
         }
     }
 }
@@ -545,6 +678,11 @@ impl AppConfig {
                 acc
             })
             .with_missing_defaults();
+        // Saved straight away, so the switch to the new look happens once
+        // and a theme chosen afterwards is never overridden again.
+        if config.appearance.migrate_theme_style() && path.exists() {
+            let _ = config.save();
+        }
         config
     }
 
@@ -603,5 +741,106 @@ mod tests {
         assert_eq!(refresh.len(), 1);
         assert_eq!(refresh[0].key, "F5");
         assert!(cfg.bindings.iter().any(|b| b.action == "toggle_dual_pane"));
+    }
+
+    #[test]
+    fn appearance_without_preview_visibility_still_loads() {
+        let old = r#"
+            icon_size = 24
+            font_size = 13
+            show_path_bar = true
+            show_status_bar = true
+            show_sidebar = true
+            sidebar_width = 200
+            preview_panel_width = 420
+        "#;
+        let appearance: AppearanceConfig = toml::from_str(old).expect("old appearance parses");
+        assert_eq!(appearance.preview_panel_width, 420);
+        assert!(!appearance.preview_panel_visible);
+    }
+
+    #[test]
+    fn old_theme_is_switched_to_raven_once() {
+        let old = r#"
+            icon_size = 24
+            font_size = 13
+            show_path_bar = true
+            show_status_bar = true
+            show_sidebar = true
+            sidebar_width = 200
+            preview_panel_width = 300
+            theme = "AdwaitaDark"
+        "#;
+        let mut appearance: AppearanceConfig = toml::from_str(old).expect("old appearance parses");
+        assert_eq!(appearance.theme_style_version, 0);
+        assert!(appearance.migrate_theme_style());
+        assert_eq!(appearance.theme, Theme::Raven);
+
+        // Picked again after the migration, a theme stays.
+        appearance.theme = Theme::Nord;
+        let saved = toml::to_string(&appearance).unwrap();
+        let mut reloaded: AppearanceConfig = toml::from_str(&saved).unwrap();
+        assert!(!reloaded.migrate_theme_style());
+        assert_eq!(reloaded.theme, Theme::Nord);
+    }
+
+    #[test]
+    fn unknown_theme_names_fall_back_without_losing_the_rest() {
+        let saved = toml::to_string(&AppearanceConfig { font_size: 17, ..Default::default() })
+            .unwrap();
+        let text = saved.replace("theme = \"Raven\"", "theme = \"SomeFutureTheme\"");
+        assert!(text.contains("SomeFutureTheme"));
+        let appearance: AppearanceConfig = toml::from_str(&text).expect("unknown theme parses");
+        assert_eq!(appearance.theme, Theme::default());
+        assert_eq!(appearance.font_size, 17);
+        for theme in Theme::ALL {
+            let saved = toml::to_string(&AppearanceConfig { theme: *theme, ..Default::default() })
+                .unwrap();
+            let reloaded: AppearanceConfig = toml::from_str(&saved).unwrap();
+            assert_eq!(reloaded.theme, *theme);
+        }
+    }
+
+    #[test]
+    fn new_configs_start_on_raven_without_migrating() {
+        let mut appearance = AppearanceConfig::default();
+        assert_eq!(appearance.theme, Theme::Raven);
+        assert!(!appearance.migrate_theme_style());
+    }
+
+    #[test]
+    fn desktop_appearance_reads_the_three_keys() {
+        let text = r##"
+            [appearance]
+            theme_mode = "light"
+            accent = "#F7768E"
+            transparency = false
+            scale = 0.9
+            wallpaper = "/somewhere.png"
+
+            [general]
+            terminal = "raven-terminal"
+        "##;
+        let a = DesktopAppearance::parse(text);
+        assert_eq!(a.theme_mode, DesktopThemeMode::Light);
+        assert_eq!(a.accent, "#F7768E");
+        assert!(!a.transparency);
+        assert_eq!(DesktopAppearance::parse("[appearance]\ntheme_mode = \"auto\"").theme_mode, DesktopThemeMode::Auto);
+    }
+
+    #[test]
+    fn desktop_appearance_falls_back_key_by_key() {
+        let text = r#"
+            [appearance]
+            theme_mode = 3
+            accent = "red; } window { color: red"
+            transparency = false
+        "#;
+        let a = DesktopAppearance::parse(text);
+        assert_eq!(a.theme_mode, DesktopThemeMode::Dark);
+        assert_eq!(a.accent, DEFAULT_ACCENT);
+        assert!(!a.transparency);
+        assert_eq!(DesktopAppearance::parse("not [toml"), DesktopAppearance::default());
+        assert_eq!(DesktopAppearance::parse(""), DesktopAppearance::default());
     }
 }

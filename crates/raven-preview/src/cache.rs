@@ -46,6 +46,12 @@ enum CachedPreviewData {
         height: u32,
         duration_secs: Option<f64>,
     },
+    Document {
+        path: PathBuf,
+        thumbnail: Option<PathBuf>,
+        page_count: Option<u32>,
+        title: Option<String>,
+    },
     Directory {
         item_count: u64,
         total_size: u64,
@@ -83,6 +89,17 @@ impl From<&PreviewData> for CachedPreviewData {
                 width: *width,
                 height: *height,
                 duration_secs: *duration_secs,
+            },
+            PreviewData::Document {
+                path,
+                thumbnail,
+                page_count,
+                title,
+            } => CachedPreviewData::Document {
+                path: path.clone(),
+                thumbnail: thumbnail.clone(),
+                page_count: *page_count,
+                title: title.clone(),
             },
             PreviewData::Directory {
                 item_count,
@@ -125,6 +142,17 @@ impl From<CachedPreviewData> for PreviewData {
                 width,
                 height,
                 duration_secs,
+            },
+            CachedPreviewData::Document {
+                path,
+                thumbnail,
+                page_count,
+                title,
+            } => PreviewData::Document {
+                path,
+                thumbnail,
+                page_count,
+                title,
             },
             CachedPreviewData::Directory {
                 item_count,

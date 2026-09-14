@@ -1,130 +1,418 @@
-/* Raven File Manager custom styles */
+/* ─────────────────────────────────────────────────────────────────────────
+   Raven File Manager — the classes only the file manager draws, appended
+   after raven-glass.css (and repeated after raven-glass-light.css in light
+   mode, which would otherwise win over them).
 
-.navigation-sidebar {
-    background: transparent;
+   Same language as the shared sheet: one material, hairlines rather than
+   borders, radii 6 · 8 · 12 · 14, secondary text as the foreground at 70%
+   alpha, and the accent only on the selected item and the primary action.
+   Written against @window_fg_color rather than white so that one sheet
+   serves light and dark.
+   ───────────────────────────────────────────────────────────────────────── */
+
+/* ── The accent, restated ────────────────────────────────────────────── */
+/* The same rules as raven-glass.css. In light mode the light sheet sits a
+   provider above it, and its plain `button`, `switch` and `checkbutton`
+   rules win over the shared sheet's accent ones whatever their specificity:
+   primary buttons came out white on white and switches grey. This sheet is
+   repeated after the light one, so saying them again here puts the accent
+   back on its two jobs. In dark mode they change nothing. */
+button.suggested-action, button.circular.accent {
+  background-color: @accent_bg_color;
+  color: #ffffff;
+  border-color: alpha(#000000, 0.12);
+  box-shadow: inset 0 1px 0 alpha(#ffffff, 0.18);
+}
+button.suggested-action:hover { background-image: linear-gradient(alpha(#ffffff, 0.10), alpha(#ffffff, 0.10)); }
+button.suggested-action:active { background-image: linear-gradient(alpha(#000000, 0.12), alpha(#000000, 0.12)); }
+button.suggested-action:disabled { opacity: 0.45; }
+button.destructive-action { background-color: @destructive_bg_color; color: #ffffff; border-color: alpha(#000000, 0.12); }
+switch:checked { background-color: @accent_bg_color; }
+checkbutton check:checked, checkbutton radio:checked {
+  background-color: @accent_bg_color;
+  border-color: transparent;
+  color: #ffffff;
+}
+popover listview > row:selected, popover list > row:selected { background-color: @accent_bg_color; color: #ffffff; }
+.sidebar list.navigation-sidebar row:selected { background-color: @accent_bg_color; color: #ffffff; box-shadow: none; }
+.sidebar list.navigation-sidebar row:selected label { color: #ffffff; }
+progressbar progress, levelbar block.filled, scale highlight { background-color: @accent_bg_color; }
+
+/* ── Header bar ──────────────────────────────────────────────────────── */
+headerbar.main-header { min-height: 46px; }
+headerbar .nav-buttons button { min-width: 30px; }
+
+/* View modes: a segmented control, the checked segment in the accent. */
+.view-switch {
+  background-color: alpha(@window_fg_color, 0.06);
+  border: 1px solid alpha(@window_fg_color, 0.06);
+  border-radius: 8px;
+  padding: 1px;
+}
+.view-switch button, headerbar .view-switch button {
+  min-height: 24px;
+  min-width: 32px;
+  padding: 0 6px;
+  border-radius: 6px;
+  background-color: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+.view-switch button:hover { background-color: alpha(@window_fg_color, 0.07); }
+.view-switch button:checked, .view-switch button:checked:hover {
+  background-color: @accent_bg_color;
+  color: #ffffff;
+  box-shadow: inset 0 1px 0 alpha(#ffffff, 0.18), 0 1px 2px alpha(#000000, 0.18);
 }
 
-.path-bar {
-    min-height: 32px;
-}
-
-.path-bar button.flat {
-    padding: 2px 6px;
-    min-height: 24px;
-}
-
-.data-table {
-    font-size: 13px;
-}
-
-.monospace {
-    font-family: monospace;
-}
-
-.dim-label {
-    opacity: 0.55;
-}
-
-.sidebar .heading {
-    font-weight: bold;
-    font-size: 12px;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    opacity: 0.7;
-}
-
-/* Git status colors */
-.git-modified {
-    color: @warning_color;
-}
-
-.git-added {
-    color: @success_color;
-}
-
-.git-deleted {
-    color: @error_color;
-}
-
-.git-untracked {
-    color: @accent_color;
-}
-
-.git-conflict {
-    color: @error_color;
-    font-weight: bold;
-}
-
-/* Tab bar */
+/* ── Tabs ────────────────────────────────────────────────────────────── */
 .tab-bar {
-    border-bottom: 1px solid @borders;
-    padding: 2px 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid alpha(@window_fg_color, 0.07);
+  background-color: transparent;
 }
-
-.tab-bar button {
-    padding: 4px 8px;
-    min-height: 24px;
-    border-radius: 6px;
+.tab-bar button.tab {
+  min-height: 26px;
+  padding: 0 4px 0 12px;
+  border-radius: 8px;
+  background-color: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  font-weight: 500;
+  color: alpha(@window_fg_color, 0.70);
 }
-
-/* Search bar */
-.search-bar {
-    background: alpha(@window_bg_color, 0.3);
-    padding: 4px 8px;
-    border-bottom: 1px solid @borders;
+.tab-bar button.tab.single { padding: 0 12px; }
+.tab-bar button.tab:hover { background-color: alpha(@window_fg_color, 0.05); }
+.tab-bar button.tab:checked {
+  background-color: alpha(@window_fg_color, 0.09);
+  border-color: alpha(@window_fg_color, 0.07);
+  box-shadow: inset 0 1px 0 alpha(#ffffff, 0.05);
+  color: @window_fg_color;
+  font-weight: 600;
 }
-
-/* Preview panel */
-.preview-panel {
-    background: alpha(@window_bg_color, 0.5);
-    border-left: 1px solid @borders;
+.tab-bar button.tab button.tab-close {
+  min-height: 20px;
+  min-width: 20px;
+  padding: 0;
+  border-radius: 999px;
+  background-color: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  color: alpha(@window_fg_color, 0.70);
 }
-
-/* Operation panel */
-.operation-panel {
-    padding: 8px;
-}
-
-.operation-panel progressbar {
-    min-height: 8px;
-}
-
-/* Drop highlight for drag-and-drop targets */
-.drop-highlight {
-    background-color: alpha(@accent_color, 0.15);
-    border: 1px dashed @accent_color;
-    border-radius: 6px;
-}
-
-/* Disk space level bar in sidebar */
-.navigation-sidebar levelbar trough {
-    min-height: 4px;
-    border-radius: 2px;
-}
-
-.caption {
-    font-size: 10px;
-}
-
-/* Grid view items (icon/preview mode) */
-gridview > child {
-    padding: 8px;
-    border-radius: 8px;
-}
-
-gridview > child:selected {
-    background-color: alpha(@accent_color, 0.15);
-}
-
-/* Dual pane */
-.pane-box {
-    border-top: 2px solid transparent;
-}
-
-.dual-pane .pane-box.active-pane {
-    border-top: 2px solid @accent_bg_color;
-}
-
+.tab-bar button.tab button.tab-close:hover { background-color: alpha(@window_fg_color, 0.10); color: @window_fg_color; }
+.tab-bar button.tab-new { min-height: 26px; min-width: 26px; padding: 0; }
 .tab-bar button.drop-target {
-    background: alpha(@accent_bg_color, 0.25);
+  background-color: alpha(@accent_bg_color, 0.14);
+  outline: 1px dashed @accent_bg_color;
+  outline-offset: -1px;
+}
+
+/* ── Search bar and banner ───────────────────────────────────────────── */
+.search-bar {
+  padding: 6px 12px;
+  border-bottom: 1px solid alpha(@window_fg_color, 0.07);
+}
+.info-banner {
+  background-color: alpha(@accent_bg_color, 0.10);
+  border-bottom: 1px solid alpha(@accent_bg_color, 0.22);
+  padding: 6px 12px;
+}
+
+/* ── Sidebar ─────────────────────────────────────────────────────────── */
+.sidebar.places { padding: 6px 8px 12px 8px; }
+.sidebar .eyebrow { margin: 14px 8px 4px 8px; }
+.sidebar .eyebrow.first { margin-top: 6px; }
+.sidebar list.navigation-sidebar row { padding: 3px 6px; }
+/* Type sizes are whole pixels for the default 13px font. themes.rs
+   (`size_css`) re-emits every one of them scaled to the Appearance font size
+   and rounded, so the setting reaches each label. Not em: a fractional size
+   makes an ellipsizing label measure narrower than it draws ("11 ite…"). */
+.sidebar list.navigation-sidebar row label { font-size: 14px; }
+.sidebar list.navigation-sidebar row .nav-icon { min-width: 22px; min-height: 22px; }
+.sidebar list.navigation-sidebar row .nav-icon image { -gtk-icon-size: 13px; }
+.sidebar list.navigation-sidebar row .caption {
+  font-size: 11px;
+  letter-spacing: 0.1px;
+  color: alpha(@window_fg_color, 0.70);
+}
+.sidebar list.navigation-sidebar row .count { font-size: 12px; color: alpha(@window_fg_color, 0.70); }
+/* On the accent, secondary text is plain white like the rest: a pale accent
+   leaves no contrast to spend on a dimmer step. Same in the file list. */
+.sidebar list.navigation-sidebar row:selected .caption,
+.sidebar list.navigation-sidebar row:selected .count { color: #ffffff; }
+/* Unmounted: dimmed by colour (the disabled step), tile included. */
+.sidebar list.navigation-sidebar row.unmounted label { color: alpha(@window_fg_color, 0.50); }
+.sidebar list.navigation-sidebar row.unmounted .nav-icon { background-color: alpha(#8e8e93, 0.45); }
+.sidebar list.navigation-sidebar row.unmounted .nav-icon image { color: alpha(#ffffff, 0.70); }
+.sidebar list.navigation-sidebar row button.flat {
+  min-height: 22px;
+  min-width: 22px;
+  padding: 0;
+  border-radius: 6px;
+}
+.sidebar list.navigation-sidebar row button.remote {
+  min-height: 24px;
+  padding: 0;
+  font-weight: 400;
+}
+.sidebar levelbar { margin-top: 3px; }
+.sidebar levelbar block { min-height: 3px; }
+.sidebar list.navigation-sidebar row:selected levelbar block.filled { background-color: #ffffff; }
+.sidebar list.navigation-sidebar row:selected levelbar block.empty { background-color: alpha(#ffffff, 0.25); }
+
+/* ── Panes ───────────────────────────────────────────────────────────── */
+.pane-box { background-color: transparent; }
+paned > separator {
+  min-width: 1px;
+  min-height: 1px;
+  background-image: none;
+  background-color: alpha(@window_fg_color, 0.08);
+}
+
+/* Path bar: a quiet well of crumbs, the folder shown in full weight. */
+.path-bar {
+  min-height: 30px;
+  padding: 2px;
+  border-radius: 8px;
+  background-color: alpha(@window_fg_color, 0.045);
+  border: 1px solid alpha(@window_fg_color, 0.07);
+}
+.path-bar button.crumb {
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 6px;
+  background-color: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  font-weight: 500;
+  color: alpha(@window_fg_color, 0.70);
+}
+.path-bar button.crumb:hover { background-color: alpha(@window_fg_color, 0.07); color: @window_fg_color; }
+.path-bar button.crumb.current { color: @window_fg_color; font-weight: 600; }
+.path-bar .crumb-sep { color: alpha(@window_fg_color, 0.40); -gtk-icon-size: 12px; }
+.path-bar .crumb-label { padding: 0 8px; font-weight: 600; }
+.crumb-menu { padding: 2px; }
+.crumb-menu button { border-radius: 6px; padding: 4px 8px; }
+.path-bar entry {
+  min-height: 24px;
+  background-color: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+/* With two panes, the active one is told by its path bar. */
+.dual-pane .pane-box.active-pane .path-bar {
+  border-color: alpha(@accent_bg_color, 0.60);
+  box-shadow: 0 0 0 1px alpha(@accent_bg_color, 0.18);
+}
+
+.quick-filter entry { min-height: 28px; }
+.no-matches { font-size: 20px; font-weight: 700; letter-spacing: -0.4px; color: @window_fg_color; }
+
+/* ── File list ───────────────────────────────────────────────────────── */
+columnview.data-table, columnview.data-table > listview { background-color: transparent; }
+/* Vertical padding only: the rows must stay exactly as wide as the header's
+   columns, or GTK warns and clips them. */
+columnview.data-table > listview { padding: 4px 0; }
+columnview.data-table > header {
+  background-color: transparent;
+  box-shadow: none;
+  border-bottom: 1px solid alpha(@window_fg_color, 0.07);
+}
+columnview.data-table > header > button {
+  min-height: 28px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 0;
+  background-color: transparent;
+  box-shadow: none;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  color: alpha(@window_fg_color, 0.70);
+}
+columnview.data-table > header > button:hover { background-color: transparent; color: @window_fg_color; }
+columnview.data-table > header > button sort-indicator { color: alpha(@window_fg_color, 0.55); -gtk-icon-size: 12px; }
+columnview.data-table > listview > row {
+  min-height: 30px;
+  border-radius: 8px;
+  background-color: transparent;
+  transition: background-color 100ms ease-out;
+}
+columnview.data-table > listview > row > cell { padding: 3px 8px; }
+columnview.data-table > listview > row:hover { background-color: alpha(@window_fg_color, 0.045); }
+columnview.data-table > listview > row:selected,
+columnview.data-table > listview > row:selected:hover {
+  background-color: @accent_bg_color;
+  color: #ffffff;
+}
+columnview.data-table > listview > row:selected label { color: #ffffff; }
+columnview.data-table > listview > row:selected label.secondary { color: #ffffff; }
+columnview.data-table > listview > row:selected image { color: #ffffff; }
+columnview.data-table.rubberband, columnview > listview > rubberband,
+gridview > rubberband {
+  background-color: alpha(@accent_bg_color, 0.14);
+  border: 1px solid alpha(@accent_bg_color, 0.60);
+  border-radius: 6px;
+}
+
+label.secondary { color: alpha(@window_fg_color, 0.70); }
+label.hidden-file { color: alpha(@window_fg_color, 0.50); }
+.monospace { font-family: monospace; font-size: 0.92em; }
+.thumb { border-radius: 6px; }
+/* A hidden file's icon or thumbnail is faded on its own; the tile, and the
+   selection drawn on it, stay at full strength. */
+.hidden-item image, .hidden-item picture { opacity: 0.6; }
+
+/* Icon and preview grids: rounded tiles, the selected one in the accent,
+   the same solid pill as a selected list or sidebar row. */
+gridview.file-grid { background-color: transparent; padding: 8px; }
+gridview.file-grid > child {
+  padding: 4px;
+  margin: 2px;
+  border-radius: 12px;
+  background-color: transparent;
+  transition: background-color 100ms ease-out;
+}
+gridview.file-grid > child:hover { background-color: alpha(@window_fg_color, 0.045); }
+gridview.file-grid > child:selected,
+gridview.file-grid > child:selected:hover {
+  background-color: @accent_bg_color;
+  box-shadow: inset 0 1px 0 alpha(#ffffff, 0.18);
+  color: #ffffff;
+}
+gridview.file-grid > child:selected label { color: #ffffff; }
+gridview.file-grid > child label { font-size: 12px; }
+gridview.file-grid .thumb { border-radius: 8px; }
+gridview.file-grid picture.thumb {
+  border-radius: 8px;
+  box-shadow: 0 1px 3px alpha(#000000, 0.25);
+}
+
+/* Version control marks */
+.git-modified { color: @warning_color; }
+.git-added { color: @success_color; }
+.git-deleted { color: @error_color; }
+.git-untracked { color: alpha(@window_fg_color, 0.70); }
+.git-conflict { color: @error_color; font-weight: bold; }
+
+/* Drop targets: an accent wash under a dashed hairline. */
+.drop-highlight {
+  background-color: alpha(@accent_bg_color, 0.12);
+  outline: 1px dashed @accent_bg_color;
+  outline-offset: -1px;
+  border-radius: 8px;
+}
+
+/* ── Preview panel: a glass side pane with the preview on a card ─────── */
+.preview-panel {
+  background-color: alpha(@window_fg_color, 0.025);
+  border-left: 1px solid alpha(@window_fg_color, 0.07);
+}
+.preview-panel .preview-title { font-size: 15px; font-weight: 600; letter-spacing: -0.1px; }
+.preview-panel .preview-card {
+  background-color: alpha(@window_fg_color, 0.045);
+  border: 1px solid alpha(@window_fg_color, 0.07);
+  border-radius: 14px;
+  box-shadow: inset 0 1px 0 alpha(#ffffff, 0.05);
+}
+.preview-panel .preview-card textview,
+.preview-panel .preview-card textview > text { background-color: transparent; }
+/* On the textview only; the text node inherits it. */
+.preview-panel .preview-card textview { font-size: 12px; }
+.preview-panel .preview-card .caption-text { font-size: 13px; color: alpha(@window_fg_color, 0.70); }
+.preview-panel picture.document-page { border-radius: 6px; box-shadow: 0 2px 8px alpha(#000000, 0.30); }
+.preview-panel .props {
+  background-color: alpha(@window_fg_color, 0.045);
+  border: 1px solid alpha(@window_fg_color, 0.07);
+  border-radius: 12px;
+  padding: 2px 12px;
+}
+.preview-panel .prop-row {
+  min-height: 30px;
+  border-bottom: 1px solid alpha(@window_fg_color, 0.06);
+}
+.preview-panel .prop-row:last-child { border-bottom: none; }
+.preview-panel .prop-key { font-size: 13px; color: alpha(@window_fg_color, 0.70); }
+.preview-panel .prop-value { font-size: 13px; }
+
+/* ── Status bar and operations ───────────────────────────────────────── */
+.status-bar {
+  min-height: 26px;
+  padding: 0 12px;
+  border-top: 1px solid alpha(@window_fg_color, 0.07);
+}
+.status-bar label { font-size: 12px; letter-spacing: 0.1px; color: alpha(@window_fg_color, 0.70); }
+.status-bar button.flat { min-height: 20px; min-width: 20px; padding: 0; }
+
+.operation-panel {
+  padding: 8px 12px;
+  border-top: 1px solid alpha(@window_fg_color, 0.07);
+}
+.operation-row {
+  background-color: alpha(@window_fg_color, 0.045);
+  border: 1px solid alpha(@window_fg_color, 0.07);
+  border-radius: 12px;
+  padding: 8px 10px 8px 12px;
+}
+.operation-row .operation-title { font-weight: 600; }
+.operation-row progressbar text { font-size: 11px; color: alpha(@window_fg_color, 0.70); }
+.operation-row .caption { font-size: 12px; color: alpha(@window_fg_color, 0.70); }
+
+.caption { font-size: 12px; letter-spacing: 0.1px; }
+
+/* ── Dialogs ─────────────────────────────────────────────────────────── */
+/* A spin button inside a row is part of the row, not a well of its own. */
+row.spin spinbutton {
+  min-height: 0;
+  background-color: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+row.spin spinbutton > button {
+  min-height: 26px;
+  min-width: 26px;
+  padding: 0;
+  border-radius: 6px;
+}
+stacksidebar.sidebar { padding: 12px 10px; }
+/* A focused entry row in a group: an inset, rounded ring inside the group's
+   outline, not libadwaita's square outline drawn across it. */
+list.boxed-list > row.entry:focus-within, list.boxed-list > row.entry.focused {
+  outline: none;
+  border-radius: 8px;
+  box-shadow: inset 0 0 0 1px alpha(@accent_bg_color, 0.65), inset 0 0 0 3px alpha(@accent_bg_color, 0.18);
+}
+list.boxed-list > row.entry:focus-within:first-child, list.boxed-list > row.entry.focused:first-child {
+  border-top-left-radius: 12px;
+  border-top-right-radius: 12px;
+}
+list.boxed-list > row.entry:focus-within:last-child, list.boxed-list > row.entry.focused:last-child {
+  border-bottom-left-radius: 12px;
+  border-bottom-right-radius: 12px;
+}
+.settings-page { padding: 8px 0; }
+
+/* Open With: the applications as selectable rows. */
+.chooser-search { margin: 10px 12px 6px 12px; }
+list.app-list { background-color: transparent; padding: 2px 8px; }
+list.app-list > row {
+  border-radius: 8px;
+  padding: 4px 8px;
+  margin: 1px 0;
+  transition: background-color 100ms ease-out;
+}
+list.app-list > row:hover { background-color: alpha(@window_fg_color, 0.05); }
+list.app-list > row:selected { background-color: @accent_bg_color; color: #ffffff; }
+list.app-list > row:selected label { color: #ffffff; }
+.chooser-footer {
+  padding: 8px 12px 12px 12px;
+  border-top: 1px solid alpha(@window_fg_color, 0.07);
+}
+
+/* The portal's open/save picker. */
+.sidebar .places { padding: 6px 8px 12px 8px; }
+.location-row {
+  padding: 6px 8px;
+  border-bottom: 1px solid alpha(@window_fg_color, 0.07);
 }

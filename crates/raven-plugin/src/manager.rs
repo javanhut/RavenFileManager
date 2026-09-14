@@ -5,7 +5,8 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use raven_core::events::AppEvent;
 
-use crate::api::PluginApi;
+use crate::actions::ActionRegistry;
+use crate::api::{PluginApi, ScopedPluginApi};
 use crate::host::{CommandPluginHost, PluginHost};
 use crate::manifest::{PluginManifest, PluginRuntime};
 
@@ -14,7 +15,13 @@ pub struct PluginManager {
     plugins: HashMap<String, Box<dyn PluginHost>>,
     plugin_dirs: Vec<PathBuf>,
     event_tx: mpsc::UnboundedSender<AppEvent>,
+    /// Context-menu actions the loaded plugins registered.
+    actions: ActionRegistry,
 }
+
+/// The hook a chosen plugin action is delivered on. Its arguments are the
+/// action name followed by the selected paths.
+pub const ACTION_HOOK: &str = "on_action";
 
 impl PluginManager {
     pub fn new(event_tx: mpsc::UnboundedSender<AppEvent>) -> Self {
@@ -22,6 +29,23 @@ impl PluginManager {
             plugins: HashMap::new(),
             plugin_dirs: Vec::new(),
             event_tx,
+            actions: ActionRegistry::new(),
+        }
+    }
+
+    /// The registry of plugin actions, shared with the plugins' API handles.
+    pub fn actions(&self) -> ActionRegistry {
+        self.actions.clone()
+    }
+
+    /// Tell the window the action set changed, if it did. Plugins without
+    /// actions load and unload without disturbing the menu.
+    fn announce_actions_if_changed(&self, before: &[crate::actions::PluginAction]) {
+        let after = self.actions.list();
+        if after.as_slice() != before {
+            let _ = self.event_tx.send(AppEvent::PluginActionsChanged {
+                actions: self.actions.snapshot(),
+            });
         }
     }
 
@@ -126,7 +150,19 @@ impl PluginManager {
             }
         };
 
-        host.load(api)?;
+        let before = self.actions.list();
+        // Each plugin gets a handle that knows whose registrations it makes.
+        let scoped: Arc<dyn PluginApi> = Arc::new(ScopedPluginApi::new(
+            plugin_id.clone(),
+            api,
+            self.actions.clone(),
+        ));
+        if let Err(e) = host.load(scoped) {
+            // Anything registered before the failure belongs to a plugin
+            // that is not there to run it.
+            self.actions.remove_plugin(&plugin_id);
+            return Err(e);
+        }
 
         let _ = self.event_tx.send(AppEvent::PluginLoaded {
             plugin_id: plugin_id.clone(),
@@ -134,6 +170,7 @@ impl PluginManager {
         });
 
         self.plugins.insert(plugin_id.clone(), host);
+        self.announce_actions_if_changed(&before);
 
         Ok(plugin_id)
     }
@@ -145,13 +182,43 @@ impl PluginManager {
             .remove(plugin_id)
             .ok_or_else(|| format!("Plugin '{}' is not loaded", plugin_id))?;
 
-        host.unload()?;
+        // The host is out of the map whether or not its cleanup succeeds, so
+        // its actions go with it either way.
+        let before = self.actions.list();
+        self.actions.remove_plugin(plugin_id);
+        let unloaded = host.unload();
+        self.announce_actions_if_changed(&before);
+        unloaded?;
 
         let _ = self.event_tx.send(AppEvent::PluginUnloaded {
             plugin_id: plugin_id.to_string(),
         });
 
         Ok(())
+    }
+
+    /// Run the action `action` that `plugin_id` registered, on `paths`.
+    ///
+    /// The plugin's [`ACTION_HOOK`] is called with the action name and then
+    /// each path. A failure is returned rather than reported, so the caller
+    /// can say which action it was.
+    pub fn invoke_action(
+        &self,
+        plugin_id: &str,
+        action: &str,
+        paths: &[String],
+    ) -> Result<(), String> {
+        let host = self
+            .plugins
+            .get(plugin_id)
+            .ok_or_else(|| format!("Plugin '{}' is not loaded", plugin_id))?;
+        if !self.actions.contains(plugin_id, action) {
+            return Err(format!(
+                "Plugin '{}' has no action '{}'",
+                plugin_id, action
+            ));
+        }
+        host.call_action(action, paths)
     }
 
     /// Get a list of loaded plugin IDs and names.
@@ -465,6 +532,116 @@ permissions = ["read_files"]
         let result = manager.load_plugin(&plugin_dir, api);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Entry point not found"));
+    }
+
+    fn create_action_plugin(parent: &Path, id: &str, script: &str) -> PathBuf {
+        let plugin_dir = parent.join(id);
+        std::fs::create_dir_all(&plugin_dir).expect("Failed to create plugin dir");
+        let manifest = format!(
+            "{}\n[[actions]]\nname = \"zip\"\nlabel = \"Compress\"\n",
+            sample_manifest_toml(id, "Action Plugin")
+        );
+        write_manifest(&plugin_dir, &manifest);
+        write_script(&plugin_dir, "run.sh", script);
+        plugin_dir
+    }
+
+    fn drain(rx: &mut mpsc::UnboundedReceiver<AppEvent>) -> Vec<AppEvent> {
+        let mut events = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            events.push(e);
+        }
+        events
+    }
+
+    #[test]
+    fn manifest_actions_are_registered_and_announced() {
+        let base_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let plugin_dir = create_action_plugin(base_dir.path(), "zipper", "#!/bin/sh\nexit 0\n");
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut manager = PluginManager::new(tx);
+        manager
+            .load_plugin(&plugin_dir, Arc::new(MockPluginApi::new()))
+            .expect("load");
+
+        assert!(manager.actions().contains("zipper", "zip"));
+        let announced: Vec<_> = drain(&mut rx)
+            .into_iter()
+            .filter_map(|e| match e {
+                AppEvent::PluginActionsChanged { actions } => Some(actions),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(announced.len(), 1);
+        assert_eq!(announced[0].len(), 1);
+        assert_eq!(announced[0][0].plugin_id, "zipper");
+        assert_eq!(announced[0][0].label, "Compress");
+
+        manager.unload_plugin("zipper").expect("unload");
+        assert!(manager.actions().list().is_empty());
+        let after_unload = drain(&mut rx);
+        assert!(after_unload.iter().any(|e| matches!(
+            e,
+            AppEvent::PluginActionsChanged { actions } if actions.is_empty()
+        )));
+    }
+
+    #[test]
+    fn plugins_without_actions_do_not_announce() {
+        let base_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let plugin_dir = create_plugin_dir(base_dir.path(), "quiet", "Quiet");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut manager = PluginManager::new(tx);
+        manager
+            .load_plugin(&plugin_dir, Arc::new(MockPluginApi::new()))
+            .expect("load");
+        assert!(!drain(&mut rx)
+            .iter()
+            .any(|e| matches!(e, AppEvent::PluginActionsChanged { .. })));
+    }
+
+    #[test]
+    fn invoke_action_passes_name_and_paths_to_the_hook() {
+        let base_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let out = base_dir.path().join("args.txt");
+        let script = format!(
+            "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\"; done > '{}'\n",
+            out.display()
+        );
+        let plugin_dir = create_action_plugin(base_dir.path(), "zipper", &script);
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut manager = PluginManager::new(tx);
+        manager
+            .load_plugin(&plugin_dir, Arc::new(MockPluginApi::new()))
+            .expect("load");
+
+        manager
+            .invoke_action("zipper", "zip", &["/tmp/a b.txt".into(), "/tmp/c".into()])
+            .expect("invoke");
+        let written = std::fs::read_to_string(&out).expect("script output");
+        assert_eq!(written, "on_action\nzip\n/tmp/a b.txt\n/tmp/c\n");
+    }
+
+    #[test]
+    fn invoke_action_rejects_unknown_plugin_or_action() {
+        let base_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let plugin_dir = create_action_plugin(base_dir.path(), "zipper", "#!/bin/sh\nexit 0\n");
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut manager = PluginManager::new(tx);
+        manager
+            .load_plugin(&plugin_dir, Arc::new(MockPluginApi::new()))
+            .expect("load");
+
+        assert!(manager
+            .invoke_action("nobody", "zip", &[])
+            .unwrap_err()
+            .contains("not loaded"));
+        assert!(manager
+            .invoke_action("zipper", "unzip", &[])
+            .unwrap_err()
+            .contains("no action"));
     }
 
     #[test]

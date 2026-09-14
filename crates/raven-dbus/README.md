@@ -11,7 +11,20 @@ Exposes file manager functionality over the D-Bus session bus for external scrip
 
 ## Bus Name
 
-Default: `com.ravenfilemanager.Raven` (configurable in `config.toml`).
+Default: `com.ravenfilemanager.Raven` (configurable in `config.toml`), served
+when `dbus.enabled` is set. The object path follows the name
+(`/com/ravenfilemanager/Raven`) and the interface is
+`com.ravenfilemanager.Raven1`: `Navigate`, `GetCurrentPath`, `GetSelection`,
+`CopyFiles`, `MoveFiles`, `DeleteFiles`, `TrashFiles`, `Search`,
+`TriggerAutomationRule`, and the `DirectoryChanged` / `OperationCompleted`
+signals. Paths must be absolute. With several windows open the first owns the
+name and the others queue for it.
+
+```sh
+gdbus call --session --dest com.ravenfilemanager.Raven \
+  --object-path /com/ravenfilemanager/Raven \
+  --method com.ravenfilemanager.Raven1.GetSelection
+```
 
 ## Tests
 

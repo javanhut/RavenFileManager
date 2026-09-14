@@ -106,6 +106,11 @@ pub enum AppEvent {
         plugin_id: String,
         error: String,
     },
+    /// The full set of context-menu actions loaded plugins have registered,
+    /// sent whenever a plugin load or unload changes it.
+    PluginActionsChanged {
+        actions: Vec<PluginActionInfo>,
+    },
 
     // Network connections
     RemoteConnected {
@@ -227,6 +232,14 @@ pub enum PreviewData {
         height: u32,
         duration_secs: Option<f64>,
     },
+    /// A paged document (PDF). The first page rendered to `thumbnail` when a
+    /// renderer could manage it; page count and title when the file parses.
+    Document {
+        path: std::path::PathBuf,
+        thumbnail: Option<std::path::PathBuf>,
+        page_count: Option<u32>,
+        title: Option<String>,
+    },
     Directory {
         item_count: u64,
         total_size: u64,
@@ -259,6 +272,17 @@ pub enum NotificationLevel {
     Info,
     Warning,
     Error,
+}
+
+/// A context-menu action a plugin registered, as the window sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginActionInfo {
+    /// The plugin to run when the action is chosen.
+    pub plugin_id: String,
+    /// The name handed back to that plugin.
+    pub name: String,
+    /// The menu label.
+    pub label: String,
 }
 
 impl From<RavenError> for AppEvent {

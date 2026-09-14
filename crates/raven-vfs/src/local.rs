@@ -117,6 +117,19 @@ impl VirtualFileSystem for LocalFs {
         Ok(())
     }
 
+    async fn write_new(&self, path: &RavenPath, contents: &[u8]) -> RavenResult<()> {
+        use tokio::io::AsyncWriteExt;
+        let local_path = Self::to_local_path(path)?;
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&local_path)
+            .await?;
+        file.write_all(contents).await?;
+        file.flush().await?;
+        Ok(())
+    }
+
     async fn copy(
         &self,
         source: &RavenPath,

@@ -141,6 +141,12 @@ pub enum AppCommand {
     UnloadPlugin {
         plugin_id: String,
     },
+    /// Run an action a plugin registered, on the files it was chosen for.
+    RunPluginAction {
+        plugin_id: String,
+        action: String,
+        paths: Vec<PathBuf>,
+    },
 
     // Network connections
     ConnectSftp {
@@ -153,9 +159,14 @@ pub enum AppCommand {
     },
     ConnectSmb {
         host: String,
+        /// Empty to browse the server's list of shares.
         share: String,
+        /// Folder inside the share to open; its root when `None`.
+        path: Option<String>,
+        /// A guest login when `None`. Kept in memory only.
         user: Option<String>,
         password: Option<String>,
+        domain: Option<String>,
     },
     DisconnectRemote {
         id: String,

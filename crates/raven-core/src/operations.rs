@@ -94,6 +94,13 @@ pub struct ConflictInfo {
     pub destination: RavenPath,
     pub source_size: u64,
     pub dest_size: u64,
+    /// The item being copied or moved is a folder.
+    #[serde(default)]
+    pub source_is_dir: bool,
+    /// The existing item is a folder. Choosing to overwrite a folder merges
+    /// into it rather than replacing it.
+    #[serde(default)]
+    pub dest_is_dir: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

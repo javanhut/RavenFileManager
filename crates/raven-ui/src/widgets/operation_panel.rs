@@ -29,28 +29,21 @@ impl OperationPanel {
         let revealer = gtk::Revealer::new();
         revealer.set_transition_type(gtk::RevealerTransitionType::SlideUp);
 
-        let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
-        outer.append(&separator);
+        let outer = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        outer.add_css_class("operation-panel");
 
         let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        header.set_margin_start(8);
-        header.set_margin_end(8);
-        header.set_margin_top(4);
 
-        let title = gtk::Label::new(Some("Operations"));
-        title.add_css_class("heading");
+        let title = gtk::Label::new(Some("OPERATIONS"));
+        title.add_css_class("eyebrow");
         title.set_halign(gtk::Align::Start);
         title.set_hexpand(true);
         header.append(&title);
 
         outer.append(&header);
 
-        let list_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        list_box.set_margin_start(8);
-        list_box.set_margin_end(8);
-        list_box.set_margin_top(4);
-        list_box.set_margin_bottom(8);
+        // Each operation is a card of its own.
+        let list_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
 
         let scroll = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
@@ -72,11 +65,13 @@ impl OperationPanel {
 
     /// Add a new operation to the panel.
     pub fn add_operation(&self, id: OperationId, description: &str) {
-        let container = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        let container = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        container.add_css_class("operation-row");
 
         let title_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
 
         let label = gtk::Label::new(Some(description));
+        label.add_css_class("operation-title");
         label.set_halign(gtk::Align::Start);
         label.set_hexpand(true);
         label.set_ellipsize(gtk::pango::EllipsizeMode::End);
@@ -133,7 +128,6 @@ impl OperationPanel {
 
         let file_label = gtk::Label::new(None);
         file_label.set_halign(gtk::Align::Start);
-        file_label.add_css_class("dim-label");
         file_label.add_css_class("caption");
         file_label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
         container.append(&file_label);

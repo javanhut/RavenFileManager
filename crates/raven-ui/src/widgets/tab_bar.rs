@@ -25,8 +25,9 @@ impl TabBar {
         let widget = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         widget.add_css_class("tab-bar");
 
-        let tabs_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        tabs_box.add_css_class("linked");
+        // Separate pills rather than a linked strip: Raven draws a choice of
+        // equals as items with air between them.
+        let tabs_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         tabs_box.set_hexpand(true);
         widget.append(&tabs_box);
 
@@ -34,25 +35,15 @@ impl TabBar {
         let new_tab_btn = gtk::Button::from_icon_name("tab-new-symbolic");
         new_tab_btn.set_tooltip_text(Some("New Tab (Ctrl+T)"));
         new_tab_btn.add_css_class("flat");
+        new_tab_btn.add_css_class("tab-new");
         {
             let state = state.clone();
             let cmd_tx = command_tx.clone();
-            new_tab_btn.connect_clicked(move |_| {
-                let path = {
-                    let s = state.borrow();
-                    s.active_tab().active_pane().current_path.clone()
-                };
-                let mut s = state.borrow_mut();
-                let _tab_id = s.add_tab(path.clone());
-                let pane_id = s.active_tab().active_pane().id;
-                drop(s);
-                let _ = cmd_tx.send(AppCommand::Navigate {
-                    path,
-                    pane_id,
-                });
-            });
+            new_tab_btn.connect_clicked(move |_| open_new_tab(&state, &cmd_tx));
         }
         widget.append(&new_tab_btn);
+        // Hidden until a second tab exists (see `refresh`).
+        widget.set_visible(false);
 
         Self {
             widget,
@@ -61,6 +52,18 @@ impl TabBar {
             command_tx,
             on_tab_changed: Rc::new(RefCell::new(None)),
         }
+    }
+
+    /// A header-bar button that opens a tab, for while the strip (and its own
+    /// "+") is hidden.
+    pub fn new_tab_button(&self) -> gtk::Button {
+        let btn = gtk::Button::from_icon_name("tab-new-symbolic");
+        btn.add_css_class("flat");
+        btn.set_tooltip_text(Some("New Tab (Ctrl+T)"));
+        let state = self.state.clone();
+        let cmd_tx = self.command_tx.clone();
+        btn.connect_clicked(move |_| open_new_tab(&state, &cmd_tx));
+        btn
     }
 
     pub fn set_on_tab_changed(&self, callback: impl Fn(u32) + 'static) {
@@ -76,6 +79,10 @@ impl TabBar {
         let s = self.state.borrow();
         let active_tab = s.active_tab;
         let tab_count = s.tabs.len();
+        // A strip holding one tab is a whole row spent on nothing: the other
+        // Raven apps start their content right under the header bar, so the
+        // strip shows only once there is a second tab to switch to.
+        self.widget.set_visible(tab_count > 1);
 
         for (idx, tab) in s.tabs.iter().enumerate() {
             let tab_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
@@ -88,9 +95,8 @@ impl TabBar {
             // Close button (only if more than one tab)
             if s.tabs.len() > 1 {
                 let close_btn = gtk::Button::from_icon_name("window-close-symbolic");
-                close_btn.add_css_class("flat");
-                close_btn.add_css_class("circular");
-                close_btn.set_margin_start(4);
+                close_btn.add_css_class("tab-close");
+                close_btn.set_valign(gtk::Align::Center);
 
                 let state = self.state.clone();
                 let tab_idx = idx;
@@ -102,6 +108,11 @@ impl TabBar {
             }
 
             let btn = gtk::ToggleButton::new();
+            btn.add_css_class("tab");
+            if tab_count == 1 {
+                // No close button, so no room kept for one.
+                btn.add_css_class("single");
+            }
             btn.set_child(Some(&tab_box));
             btn.set_active(idx == active_tab);
 
@@ -150,35 +161,27 @@ impl TabBar {
             btn.add_controller(source);
         }
 
-        let target = gtk::DropTarget::new(
-            glib::types::Type::STRING,
-            gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE,
-        );
-        {
-            let btn = btn.clone();
-            target.connect_enter(move |_, _, _| {
-                btn.add_css_class("drop-target");
-                gtk::gdk::DragAction::MOVE
-            });
-        }
-        {
-            let btn = btn.clone();
-            target.connect_leave(move |_| {
-                btn.remove_css_class("drop-target");
-            });
-        }
+        // Tab drags only offer MOVE, so the shared copy/move feedback shows a
+        // move for them; files get copy or move by modifier and filesystem.
+        let target = {
+            let state = self.state.clone();
+            crate::dnd::file_drop_target(Some("drop-target"), move || {
+                state.borrow().tabs.get(idx).map(|t| t.active_pane().current_path.clone())
+            })
+        };
         {
             let state = self.state.clone();
             let cmd_tx = self.command_tx.clone();
             let on_changed = self.on_tab_changed.clone();
             let tabs_box = self.tabs_box.clone();
             let btn = btn.clone();
-            target.connect_drop(move |_, value, _, _| {
+            target.connect_drop(move |target, value, _, _| {
                 btn.remove_css_class("drop-target");
-                let Ok(text) = value.get::<String>() else {
-                    return false;
+                let drop = match value.get::<String>() {
+                    Ok(text) => parse_tab_drop(&text),
+                    Err(_) => TabDrop::Files,
                 };
-                match parse_tab_drop(&text) {
+                match drop {
                     TabDrop::Tab(from) => {
                         let moved = state.borrow_mut().move_tab(from, idx);
                         if moved {
@@ -194,7 +197,7 @@ impl TabBar {
                         }
                         moved
                     }
-                    TabDrop::Files(sources) => {
+                    TabDrop::Files => {
                         let destination = {
                             let s = state.borrow();
                             s.tabs.get(idx).map(|t| t.active_pane().current_path.clone())
@@ -202,14 +205,7 @@ impl TabBar {
                         let Some(destination) = destination else {
                             return false;
                         };
-                        if sources.iter().any(|src| src.parent().as_ref() == Some(&destination)) {
-                            return false;
-                        }
-                        let _ = cmd_tx.send(AppCommand::MoveFiles {
-                            sources,
-                            destination,
-                        });
-                        true
+                        crate::dnd::perform_drop(target, value, &destination, &cmd_tx)
                     }
                     TabDrop::Nothing => false,
                 }
@@ -219,6 +215,16 @@ impl TabBar {
     }
 }
 
+/// Open a tab on the active pane's folder.
+fn open_new_tab(state: &AppState, cmd_tx: &tokio::sync::mpsc::UnboundedSender<AppCommand>) {
+    let path = state.borrow().active_tab().active_pane().current_path.clone();
+    let mut s = state.borrow_mut();
+    let _tab_id = s.add_tab(path.clone());
+    let pane_id = s.active_tab().active_pane().id;
+    drop(s);
+    let _ = cmd_tx.send(AppCommand::Navigate { path, pane_id });
+}
+
 const TAB_DRAG_PREFIX: &str = "raven-tab:";
 
 /// What landed on a tab.
@@ -226,11 +232,13 @@ const TAB_DRAG_PREFIX: &str = "raven-tab:";
 enum TabDrop {
     /// Another tab, by its index before the move.
     Tab(usize),
-    /// Files from a listing.
-    Files(Vec<raven_core::path::RavenPath>),
+    /// Files, as a file list or URI text; `dnd::perform_drop` reads them.
+    Files,
     Nothing,
 }
 
+/// Classify a string dropped on a tab. Non-string values (file lists) are
+/// always files.
 fn parse_tab_drop(text: &str) -> TabDrop {
     if let Some(rest) = text.strip_prefix(TAB_DRAG_PREFIX) {
         return match rest.trim().parse::<usize>() {
@@ -238,17 +246,10 @@ fn parse_tab_drop(text: &str) -> TabDrop {
             Err(_) => TabDrop::Nothing,
         };
     }
-    let files: Vec<_> = text
-        .lines()
-        .map(|l| l.trim().trim_end_matches('\r'))
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .filter_map(|l| l.strip_prefix("file://"))
-        .map(|p| raven_core::path::RavenPath::local(std::path::PathBuf::from(p)))
-        .collect();
-    if files.is_empty() {
+    if crate::dnd::parse_uri_list(text).is_empty() {
         TabDrop::Nothing
     } else {
-        TabDrop::Files(files)
+        TabDrop::Files
     }
 }
 
@@ -279,11 +280,8 @@ mod tests {
         assert_eq!(parse_tab_drop("raven-tab:2"), TabDrop::Tab(2));
         assert_eq!(parse_tab_drop("raven-tab:x"), TabDrop::Nothing);
         assert_eq!(
-            parse_tab_drop("file:///a/b.txt\r\nfile:///a/c.txt\r\n"),
-            TabDrop::Files(vec![
-                raven_core::path::RavenPath::local("/a/b.txt"),
-                raven_core::path::RavenPath::local("/a/c.txt"),
-            ])
+            parse_tab_drop("file:///a/b.txt\r\nfile:///a/c%20d.txt\r\n"),
+            TabDrop::Files
         );
         assert_eq!(parse_tab_drop("hello"), TabDrop::Nothing);
     }

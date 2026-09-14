@@ -28,10 +28,7 @@ impl SearchBar {
         revealer.set_transition_type(gtk::RevealerTransitionType::SlideDown);
 
         let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        hbox.set_margin_start(8);
-        hbox.set_margin_end(8);
-        hbox.set_margin_top(4);
-        hbox.set_margin_bottom(4);
+        hbox.add_css_class("search-bar");
 
         // Search mode dropdown
         let modes = gtk::StringList::new(&["Filter", "Filename", "Content", "Smart"]);

@@ -44,6 +44,22 @@ impl CopyEngine {
         bytes_total: u64,
         progress: Option<&ProgressCallback>,
     ) -> RavenResult<u64> {
+        self.copy_file_opts(src, dst, false, bytes_offset, bytes_total, progress)
+            .await
+    }
+
+    /// Like [`copy_file`](Self::copy_file); with `exclusive` the destination
+    /// is created only if nothing is there yet (`AlreadyExists` otherwise),
+    /// and is never truncated.
+    async fn copy_file_opts(
+        &self,
+        src: &Path,
+        dst: &Path,
+        exclusive: bool,
+        bytes_offset: u64,
+        bytes_total: u64,
+        progress: Option<&ProgressCallback>,
+    ) -> RavenResult<u64> {
         let metadata = tokio::fs::metadata(src).await?;
         let file_size = metadata.len();
 
@@ -53,7 +69,15 @@ impl CopyEngine {
         }
 
         let mut src_file = tokio::fs::File::open(src).await?;
-        let mut dst_file = tokio::fs::File::create(dst).await?;
+        let mut dst_file = if exclusive {
+            tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(dst)
+                .await?
+        } else {
+            tokio::fs::File::create(dst).await?
+        };
 
         let mut buf = vec![0u8; self.buffer_size];
         let mut copied = 0u64;
@@ -95,9 +119,32 @@ impl CopyEngine {
         dst: &Path,
         progress: Option<&ProgressCallback>,
     ) -> RavenResult<u64> {
+        self.copy_recursive_opts(src, dst, false, progress).await
+    }
+
+    /// Recursively copy without replacing anything: every file and link is
+    /// created exclusively, so a name that is already taken fails the copy
+    /// with `AlreadyExists` instead of being written over. Folders that
+    /// already exist are entered.
+    pub async fn copy_recursive_new(
+        &self,
+        src: &Path,
+        dst: &Path,
+        progress: Option<&ProgressCallback>,
+    ) -> RavenResult<u64> {
+        self.copy_recursive_opts(src, dst, true, progress).await
+    }
+
+    async fn copy_recursive_opts(
+        &self,
+        src: &Path,
+        dst: &Path,
+        exclusive: bool,
+        progress: Option<&ProgressCallback>,
+    ) -> RavenResult<u64> {
         let total_bytes = self.calculate_size(src).await?;
         let bytes_done = Arc::new(AtomicU64::new(0));
-        self.copy_recursive_inner(src, dst, &bytes_done, total_bytes, progress)
+        self.copy_recursive_inner(src, dst, exclusive, &bytes_done, total_bytes, progress)
             .await?;
         Ok(total_bytes)
     }
@@ -107,6 +154,7 @@ impl CopyEngine {
         &'a self,
         src: &'a Path,
         dst: &'a Path,
+        exclusive: bool,
         bytes_done: &'a Arc<AtomicU64>,
         bytes_total: u64,
         progress: Option<&'a ProgressCallback>,
@@ -125,6 +173,7 @@ impl CopyEngine {
                     self.copy_recursive_inner(
                         &child_src,
                         &child_dst,
+                        exclusive,
                         bytes_done,
                         bytes_total,
                         progress,
@@ -141,13 +190,16 @@ impl CopyEngine {
                 }
             } else if metadata.is_symlink() {
                 let target = tokio::fs::read_link(src).await?;
-                // Remove destination if it already exists to avoid errors
-                let _ = tokio::fs::remove_file(dst).await;
+                // Replace an existing link or file only when replacing was
+                // agreed to; otherwise creating the link fails if taken.
+                if !exclusive {
+                    let _ = tokio::fs::remove_file(dst).await;
+                }
                 tokio::fs::symlink(&target, dst).await?;
             } else {
                 let current_done = bytes_done.load(Ordering::SeqCst);
                 let file_size = self
-                    .copy_file(src, dst, current_done, bytes_total, progress)
+                    .copy_file_opts(src, dst, exclusive, current_done, bytes_total, progress)
                     .await?;
                 bytes_done.fetch_add(file_size, Ordering::SeqCst);
             }

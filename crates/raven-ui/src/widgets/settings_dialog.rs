@@ -12,9 +12,18 @@ use raven_core::config::{AppConfig, FileAssociation, Keybinding, Theme, ViewMode
 use crate::state::AppState;
 use crate::themes;
 
+/// What the theme row says under its title: where the colours come from.
+fn theme_subtitle(theme: Theme) -> &'static str {
+    match theme {
+        Theme::Raven => "Set in Raven Settings",
+        _ => "Palette colours in Raven Glass",
+    }
+}
+
 /// Settings dialog with pages for general, appearance, keybindings, and file associations.
 pub struct SettingsDialog {
     pub window: adw::Window,
+    stack: gtk::Stack,
 }
 
 impl SettingsDialog {
@@ -42,6 +51,8 @@ impl SettingsDialog {
         let sidebar = gtk::StackSidebar::new();
         sidebar.set_stack(&stack);
         sidebar.set_width_request(180);
+        // Raven Glass's sidebar, which draws its own edge.
+        sidebar.add_css_class("sidebar");
 
         // Build pages
         let config = {
@@ -96,8 +107,6 @@ impl SettingsDialog {
 
         let content_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         content_box.append(&sidebar);
-        let sep = gtk::Separator::new(gtk::Orientation::Vertical);
-        content_box.append(&sep);
         content_box.append(&stack);
         stack.set_hexpand(true);
         stack.set_vexpand(true);
@@ -105,11 +114,16 @@ impl SettingsDialog {
         toolbar_view.set_content(Some(&content_box));
         window.set_content(Some(&toolbar_view));
 
-        Self { window }
+        Self { window, stack }
     }
 
     pub fn present(&self) {
         self.window.present();
+    }
+
+    /// Show the page named `name` ("general", "appearance", ...).
+    pub fn show_page(&self, name: &str) {
+        self.stack.set_visible_child_name(name);
     }
 
     fn build_general_page(config: &AppConfig, state: AppState) -> gtk::ScrolledWindow {
@@ -234,11 +248,13 @@ impl SettingsDialog {
             .position(|t| *t == config.appearance.theme)
             .unwrap_or(0);
         theme_row.set_selected(current_idx as u32);
+        theme_row.set_subtitle(theme_subtitle(config.appearance.theme));
         {
             let state = state.clone();
             theme_row.connect_selected_notify(move |row| {
                 let idx = row.selected() as usize;
                 let theme = Theme::ALL.get(idx).copied().unwrap_or_default();
+                row.set_subtitle(theme_subtitle(theme));
                 themes::apply_theme(theme);
                 let mut s = state.borrow_mut();
                 s.config.appearance.theme = theme;

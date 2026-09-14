@@ -12,6 +12,20 @@ pub struct PluginManifest {
     pub entry_point: String,
     #[serde(default)]
     pub permissions: Vec<PluginPermission>,
+    /// Context-menu actions, declared here because a command plugin is a
+    /// script and has no way to call `register_action` itself. The host
+    /// registers them when the plugin loads.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<ManifestAction>,
+}
+
+/// One `[[actions]]` table in plugin.toml.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestAction {
+    /// Passed to the plugin's `on_action` hook when chosen.
+    pub name: String,
+    /// Shown in the context menu.
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +93,7 @@ permissions = ["read_files", "notifications"]
             runtime: PluginRuntime::Command,
             entry_point: "main.sh".to_string(),
             permissions: vec![PluginPermission::ReadFiles, PluginPermission::Shell],
+            actions: Vec::new(),
         };
 
         let toml_string = toml::to_string(&manifest).expect("Failed to serialize manifest");
@@ -121,6 +136,25 @@ permissions = ["read_files", "notifications"]
     }
 
     #[test]
+    fn test_actions_parse_and_default_to_none() {
+        let with_actions = format!(
+            "{}\n[[actions]]\nname = \"zip\"\nlabel = \"Compress\"\n\n[[actions]]\nname = \"sum\"\nlabel = \"Checksum\"\n",
+            sample_manifest_toml()
+        );
+        let manifest: PluginManifest = toml::from_str(&with_actions).expect("parse");
+        assert_eq!(
+            manifest.actions,
+            vec![
+                ManifestAction { name: "zip".into(), label: "Compress".into() },
+                ManifestAction { name: "sum".into(), label: "Checksum".into() },
+            ]
+        );
+
+        let without: PluginManifest = toml::from_str(&sample_manifest_toml()).expect("parse");
+        assert!(without.actions.is_empty());
+    }
+
+    #[test]
     fn test_load_manifest_missing_file() {
         let result = PluginManifest::load(std::path::Path::new("/nonexistent/plugin.toml"));
         assert!(result.is_err());
@@ -151,6 +185,7 @@ permissions = ["read_files", "notifications"]
             runtime: PluginRuntime::Command,
             entry_point: "run.sh".to_string(),
             permissions: vec![PluginPermission::ReadFiles, PluginPermission::Notifications],
+            actions: Vec::new(),
         };
 
         assert!(manifest.has_permission(PluginPermission::ReadFiles));

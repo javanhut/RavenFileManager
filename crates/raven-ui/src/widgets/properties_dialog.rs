@@ -11,7 +11,7 @@ use raven_core::commands::AppCommand;
 use raven_core::entry::FileEntry;
 use raven_core::system_types::{PackageInfo, ProcessLock, SystemdUnit};
 
-use crate::widgets::file_list::format_size;
+use crate::widgets::file_list::{format_local_time, format_size};
 
 /// Modal properties dialog showing comprehensive file information with async-loaded system sections.
 pub struct PropertiesDialog {
@@ -77,7 +77,6 @@ impl PropertiesDialog {
         name_label.add_css_class("title-2");
         name_label.set_halign(gtk::Align::Start);
         name_label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-        name_label.set_selectable(true);
         name_box.append(&name_label);
 
         let kind_str = match entry.kind {
@@ -99,13 +98,13 @@ impl PropertiesDialog {
         content.append(&header_box);
 
         // --- General section ---
-        let general_frame = make_section("General");
+        let (general_section, general_frame) = make_section("General");
 
         let path_str = format!("{}", entry.path);
-        general_frame.append(&make_info_row("Path", &path_str));
+        add_row(&general_frame, &make_info_row("Path", &path_str));
 
         if !entry.is_dir() {
-            general_frame.append(&make_info_row("Size", &format_size(entry.metadata.size)));
+            add_row(&general_frame, &make_info_row("Size", &format_size(entry.metadata.size)));
         }
 
         let perm_str = format!(
@@ -113,38 +112,40 @@ impl PropertiesDialog {
             format_permissions_rwx(entry.metadata.permissions),
             entry.metadata.permissions & 0o7777
         );
-        general_frame.append(&make_info_row("Permissions", &perm_str));
+        add_row(&general_frame, &make_info_row("Permissions", &perm_str));
 
-        general_frame.append(&make_info_row("Owner UID", &entry.metadata.owner_uid.to_string()));
-        general_frame.append(&make_info_row("Group GID", &entry.metadata.group_gid.to_string()));
+        add_row(&general_frame, &make_info_row("Owner UID", &entry.metadata.owner_uid.to_string()));
+        add_row(&general_frame, &make_info_row("Group GID", &entry.metadata.group_gid.to_string()));
 
         if let Some(dt) = entry.metadata.modified {
-            general_frame.append(&make_info_row("Modified", &dt.format("%Y-%m-%d %H:%M:%S").to_string()));
+            add_row(&general_frame, &make_info_row("Modified", &format_local_time(&dt)));
         }
         if let Some(dt) = entry.metadata.created {
-            general_frame.append(&make_info_row("Created", &dt.format("%Y-%m-%d %H:%M:%S").to_string()));
+            add_row(&general_frame, &make_info_row("Created", &format_local_time(&dt)));
         }
         if let Some(ref mime) = entry.metadata.mime_type {
-            general_frame.append(&make_info_row("MIME Type", mime));
+            add_row(&general_frame, &make_info_row("MIME Type", mime));
         }
         if let Some(ref target) = entry.metadata.symlink_target {
-            general_frame.append(&make_info_row("Link Target", &target.display().to_string()));
+            add_row(&general_frame, &make_info_row("Link Target", &target.display().to_string()));
         }
 
-        content.append(&general_frame);
+        content.append(&general_section);
 
         // --- Package Owner section (async) ---
         let (package_section, package_row, package_spinner) = make_async_section("Package Owner");
         content.append(&package_section);
 
         // --- Process Locks section (async) ---
-        let locks_section = make_section("Open File Handles");
+        let (locks_section, locks_list) = make_section("Open File Handles");
         let locks_spinner = gtk::Spinner::new();
         locks_spinner.set_spinning(true);
-        locks_spinner.set_halign(gtk::Align::Start);
-        locks_section.append(&locks_spinner);
+        locks_spinner.set_halign(gtk::Align::Center);
         let locks_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        locks_section.append(&locks_box);
+        let locks_content = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        locks_content.append(&locks_spinner);
+        locks_content.append(&locks_box);
+        add_row(&locks_list, &locks_content);
         content.append(&locks_section);
 
         // --- Disk Usage section (directories only, async) ---
@@ -154,13 +155,15 @@ impl PropertiesDialog {
         }
 
         // --- Systemd Unit section (only for unit files) ---
-        let systemd_section_box = make_section("Systemd Unit");
+        let (systemd_section_box, systemd_list) = make_section("Systemd Unit");
         let systemd_spinner = gtk::Spinner::new();
         systemd_spinner.set_spinning(true);
-        systemd_spinner.set_halign(gtk::Align::Start);
-        systemd_section_box.append(&systemd_spinner);
+        systemd_spinner.set_halign(gtk::Align::Center);
         let systemd_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        systemd_section_box.append(&systemd_box);
+        let systemd_content = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        systemd_content.append(&systemd_spinner);
+        systemd_content.append(&systemd_box);
+        add_row(&systemd_list, &systemd_content);
 
         let is_systemd_unit = entry.name.ends_with(".service")
             || entry.name.ends_with(".timer")
@@ -210,6 +213,21 @@ impl PropertiesDialog {
 
     pub fn present(&self) {
         self.window.present();
+        // Opened, nothing is being edited. The first selectable value takes
+        // the initial focus as the window shows, which puts a caret in it and
+        // selects all of its text; drop both, leaving the values selectable
+        // and reachable with Tab.
+        GtkWindowExt::set_focus(&self.window, None::<&gtk::Widget>);
+        let mut pending: Vec<gtk::Widget> = self.window.first_child().into_iter().collect();
+        while let Some(widget) = pending.pop() {
+            if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+                if label.has_css_class("info-value") {
+                    label.select_region(0, 0);
+                }
+            }
+            pending.extend(widget.first_child());
+            pending.extend(widget.next_sibling());
+        }
     }
 
     pub fn file_path(&self) -> Option<&PathBuf> {
@@ -302,9 +320,11 @@ impl PropertiesDialog {
     }
 }
 
-/// Create a section container with a title.
-fn make_section(title: &str) -> gtk::Box {
-    let section = gtk::Box::new(gtk::Orientation::Vertical, 4);
+/// A titled section: a heading over a rounded group of rows, the grouped
+/// list Settings and Connect to Server use. Returns the section to place and
+/// the group to fill with [`add_row`].
+fn make_section(title: &str) -> (gtk::Box, gtk::ListBox) {
+    let section = gtk::Box::new(gtk::Orientation::Vertical, 6);
     section.set_margin_top(4);
 
     let label = gtk::Label::new(Some(title));
@@ -312,27 +332,47 @@ fn make_section(title: &str) -> gtk::Box {
     label.set_halign(gtk::Align::Start);
     section.append(&label);
 
-    let sep = gtk::Separator::new(gtk::Orientation::Horizontal);
-    section.append(&sep);
+    let group = gtk::ListBox::new();
+    group.add_css_class("boxed-list");
+    group.set_selection_mode(gtk::SelectionMode::None);
+    section.append(&group);
 
-    section
+    (section, group)
 }
 
-/// Create a section with a spinner and a result label (initially hidden).
-fn make_async_section(title: &str) -> (gtk::Box, gtk::Label, gtk::Spinner) {
-    let section = make_section(title);
+/// Add `content` to a section's group as a row that only shows information:
+/// not activatable and not a focus stop.
+fn add_row(group: &gtk::ListBox, content: &impl IsA<gtk::Widget>) {
+    content.set_margin_start(12);
+    content.set_margin_end(12);
+    content.set_margin_top(8);
+    content.set_margin_bottom(8);
+    content.set_valign(gtk::Align::Center);
+    let row = gtk::ListBoxRow::new();
+    row.set_activatable(false);
+    row.set_focusable(false);
+    row.set_child(Some(content));
+    group.append(&row);
+}
 
+/// Create a section with a spinner and a result label (initially hidden),
+/// both in one row so the spinner sits centred where the result will be.
+fn make_async_section(title: &str) -> (gtk::Box, gtk::Label, gtk::Spinner) {
+    let (section, group) = make_section(title);
+
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let spinner = gtk::Spinner::new();
     spinner.set_spinning(true);
-    spinner.set_halign(gtk::Align::Start);
-    section.append(&spinner);
+    spinner.set_halign(gtk::Align::Center);
+    content.append(&spinner);
 
     let label = gtk::Label::new(None);
     label.set_halign(gtk::Align::Start);
     label.set_selectable(true);
     label.set_wrap(true);
     label.set_visible(false);
-    section.append(&label);
+    content.append(&label);
+    add_row(&group, &content);
 
     (section, label, spinner)
 }
@@ -354,6 +394,7 @@ fn make_info_row(key: &str, value: &str) -> gtk::Box {
     val_label.set_halign(gtk::Align::Start);
     val_label.set_hexpand(true);
     val_label.set_selectable(true);
+    val_label.add_css_class("info-value");
     val_label.set_wrap(true);
     val_label.set_xalign(0.0);
     row.append(&val_label);

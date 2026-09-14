@@ -18,6 +18,9 @@ thiserror = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 
+# SMB2/3 client: pure Rust, so no libsmbclient or gvfs is needed at runtime.
+smb2 = "0.21"
+
 # SFTP dependencies (behind feature flag)
 russh = { version = "0.46", optional = true }
 russh-sftp = { version = "2.1", optional = true }

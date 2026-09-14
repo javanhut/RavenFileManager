@@ -32,6 +32,8 @@ use crate::widgets::settings_dialog::SettingsDialog;
 use crate::widgets::sidebar::Sidebar;
 use crate::widgets::tab_bar::TabBar;
 
+mod snapshot;
+
 pub struct RavenWindow {
     pub window: adw::ApplicationWindow,
     pub state: AppState,
@@ -58,6 +60,12 @@ pub struct RavenWindow {
     /// The "Connect to Server" dialog while it is open, so a failed attempt
     /// can be reported into it and a successful one closes it.
     connect_dialog: Rc<RefCell<Option<Rc<ConnectDialog>>>>,
+    /// Context-menu actions registered by loaded plugins, as last reported.
+    plugin_actions: RefCell<Vec<raven_core::events::PluginActionInfo>>,
+    /// The header's preview toggle and list/icon/preview buttons, which the
+    /// snapshot mode presses the way a person would.
+    preview_btn: gtk::ToggleButton,
+    view_buttons: [gtk::ToggleButton; 3],
 }
 
 impl RavenWindow {
@@ -90,12 +98,15 @@ impl RavenWindow {
 
         // --- Header bar ---
         let header = adw::HeaderBar::new();
+        header.add_css_class("main-header");
 
-        // Navigation buttons
-        let nav_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        nav_box.add_css_class("linked");
+        // Navigation buttons: flat, as everything in the header is but the
+        // view switch, which is the one control there showing a choice.
+        let nav_box = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+        nav_box.add_css_class("nav-buttons");
 
         let back_btn = gtk::Button::from_icon_name("go-previous-symbolic");
+        back_btn.add_css_class("flat");
         back_btn.set_tooltip_text(Some("Back (Alt+Left)"));
         {
             let state = state.clone();
@@ -107,6 +118,7 @@ impl RavenWindow {
         nav_box.append(&back_btn);
 
         let forward_btn = gtk::Button::from_icon_name("go-next-symbolic");
+        forward_btn.add_css_class("flat");
         forward_btn.set_tooltip_text(Some("Forward (Alt+Right)"));
         {
             let state = state.clone();
@@ -118,6 +130,7 @@ impl RavenWindow {
         nav_box.append(&forward_btn);
 
         let up_btn = gtk::Button::from_icon_name("go-up-symbolic");
+        up_btn.add_css_class("flat");
         up_btn.set_tooltip_text(Some("Up (Alt+Up)"));
         {
             let state = state.clone();
@@ -130,9 +143,9 @@ impl RavenWindow {
 
         header.pack_start(&nav_box);
 
-        // View mode toggle buttons
-        let view_mode_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        view_mode_box.add_css_class("linked");
+        // View mode toggle buttons: a segmented control, the Raven way.
+        let view_mode_box = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+        view_mode_box.add_css_class("view-switch");
 
         let list_btn = gtk::ToggleButton::new();
         list_btn.set_icon_name("view-list-symbolic");
@@ -164,6 +177,7 @@ impl RavenWindow {
         header.pack_start(&view_mode_box);
 
         let dual_btn = gtk::Button::from_icon_name("view-dual-symbolic");
+        dual_btn.add_css_class("flat");
         dual_btn.set_tooltip_text(Some("Dual pane (F3)"));
         {
             let views = views.clone();
@@ -173,6 +187,7 @@ impl RavenWindow {
 
         // Settings button (hamburger menu)
         let settings_btn = gtk::Button::from_icon_name("open-menu-symbolic");
+        settings_btn.add_css_class("flat");
         settings_btn.set_tooltip_text(Some("Settings (Ctrl+,)"));
         {
             let state = state.clone();
@@ -188,12 +203,14 @@ impl RavenWindow {
         // Search toggle button
         let search_btn = gtk::ToggleButton::new();
         search_btn.set_icon_name("system-search-symbolic");
+        search_btn.add_css_class("flat");
         search_btn.set_tooltip_text(Some("Search (Ctrl+F)"));
         header.pack_end(&search_btn);
 
         // Hidden files toggle
         let hidden_btn = gtk::ToggleButton::new();
         hidden_btn.set_icon_name("view-reveal-symbolic");
+        hidden_btn.add_css_class("flat");
         hidden_btn.set_tooltip_text(Some("Show hidden files (Ctrl+H)"));
         header.pack_end(&hidden_btn);
 
@@ -206,6 +223,9 @@ impl RavenWindow {
         // --- Tab bar ---
         let tab_bar = Rc::new(TabBar::new(state.clone(), command_tx.clone()));
         toolbar_view.add_top_bar(&tab_bar.widget);
+        // The strip hides itself while there is one tab, so opening a tab
+        // needs a home that is always there.
+        header.pack_start(&tab_bar.new_tab_button());
 
         // --- Search bar ---
         let get_path = {
@@ -264,11 +284,12 @@ impl RavenWindow {
             .child(&sidebar.widget)
             .build();
         sidebar_scroll.set_width_request(200);
-
-        let sidebar_separator = gtk::Separator::new(gtk::Orientation::Vertical);
+        // Raven Glass's sidebar: its own darker layer and a hairline edge,
+        // so no separator is needed beside it.
+        sidebar_scroll.add_css_class("sidebar");
+        sidebar_scroll.add_css_class("places");
 
         content_box.append(&sidebar_scroll);
-        content_box.append(&sidebar_separator);
         content_box.append(&views.paned);
 
         // --- Context menu state shared by both panes' menus ---
@@ -278,11 +299,16 @@ impl RavenWindow {
         // Register file actions on the column_view
         let action_group = gio::SimpleActionGroup::new();
 
+        // The status label is built after the actions; opening failures reach
+        // it through this slot, filled once the label exists.
+        let open_status: Rc<RefCell<Option<gtk::Label>>> = Rc::new(RefCell::new(None));
+
         // file.open
         {
             let file_list = file_list.clone();
             let state = state.clone();
             let cmd_tx = command_tx.clone();
+            let open_status = open_status.clone();
             let action = gio::SimpleAction::new("open", None);
             action.connect_activate(move |_, _| {
                 let selected = get_selected_entries(&file_list.get());
@@ -306,7 +332,9 @@ impl RavenWindow {
                         });
                     } else {
                         let config = state.borrow().config.clone();
-                        crate::file_opener::open_file(&entry.path, &config);
+                        if let Err(e) = crate::file_opener::try_open_file(&entry.path, &config) {
+                            report_open_error(&open_status, &e);
+                        }
                     }
                     return;
                 }
@@ -314,7 +342,9 @@ impl RavenWindow {
                 let config = state.borrow().config.clone();
                 for entry in selected {
                     if !entry.is_dir() {
-                        crate::file_opener::open_file(&entry.path, &config);
+                        if let Err(e) = crate::file_opener::try_open_file(&entry.path, &config) {
+                            report_open_error(&open_status, &e);
+                        }
                     }
                 }
             });
@@ -609,33 +639,100 @@ impl RavenWindow {
             action_group.add_action(&action);
         }
 
-        // file.open-with(association-index)
+        // file.open-with(target): "app:<desktop-id>", "assoc:<index>" or "other"
+        // (see file_opener::OpenWithTarget). Applications get the whole
+        // selection in one launch; config associations run once per file.
         {
             let file_list = file_list.clone();
             let state = state.clone();
-            let action = gio::SimpleAction::new("open-with", Some(glib::VariantTy::INT32));
+            let open_status = open_status.clone();
+            let window_ref = window.clone();
+            let action = gio::SimpleAction::new("open-with", Some(glib::VariantTy::STRING));
             action.connect_activate(move |_, parameter| {
-                let Some(assoc_idx) = parameter.and_then(|value| value.get::<i32>()) else {
+                use crate::file_opener::OpenWithTarget;
+                let Some(target) = parameter
+                    .and_then(|value| value.get::<String>())
+                    .and_then(|s| OpenWithTarget::parse(&s))
+                else {
                     return;
                 };
-                if assoc_idx < 0 {
-                    return;
-                }
 
                 let selected = get_selected_entries(&file_list.get());
                 if selected.is_empty() {
                     return;
                 }
-                let config = state.borrow().config.clone();
-                for entry in selected {
-                    if entry.is_dir() {
-                        continue;
+                let display = gtk::prelude::RootExt::display(&window_ref);
+
+                match target {
+                    OpenWithTarget::App(id) => {
+                        let paths: Vec<RavenPath> =
+                            selected.iter().map(|e| e.path.clone()).collect();
+                        let result = match crate::file_opener::app_by_id(&id) {
+                            Some(app) => crate::file_opener::launch_app_with(&app, &paths, &display),
+                            None => Err(format!("Application {} is no longer installed", id)),
+                        };
+                        if let Err(e) = result {
+                            report_open_error(&open_status, &e);
+                        }
                     }
-                    crate::file_opener::open_with_association(
-                        &entry.path,
-                        &config,
-                        assoc_idx as usize,
-                    );
+                    OpenWithTarget::Association(index) => {
+                        let config = state.borrow().config.clone();
+                        for entry in selected.iter().filter(|e| !e.is_dir()) {
+                            if let Err(e) = crate::file_opener::open_with_association(
+                                &entry.path,
+                                &config,
+                                index,
+                            ) {
+                                report_open_error(&open_status, &e);
+                            }
+                        }
+                    }
+                    OpenWithTarget::Other => {
+                        let primary = &selected[0];
+                        let content_type = if primary.is_dir() {
+                            "inode/directory".to_string()
+                        } else {
+                            primary
+                                .metadata
+                                .mime_type
+                                .clone()
+                                .filter(|m| !m.is_empty())
+                                .or_else(|| {
+                                    primary
+                                        .path
+                                        .as_local_path()
+                                        .map(|p| crate::file_opener::content_type_for_path(p))
+                                })
+                                .unwrap_or_else(|| "application/octet-stream".to_string())
+                        };
+                        let paths: Vec<RavenPath> =
+                            selected.iter().map(|e| e.path.clone()).collect();
+                        let open_status = open_status.clone();
+                        let chooser_type = content_type.clone();
+                        crate::widgets::app_chooser_dialog::show_app_chooser(
+                            &window_ref,
+                            &content_type,
+                            move |app, always| {
+                                if always {
+                                    if let Err(e) = app.set_as_default_for_type(&chooser_type) {
+                                        report_open_error(
+                                            &open_status,
+                                            &format!(
+                                                "Could not make {} the default: {}",
+                                                app.display_name(),
+                                                e.message()
+                                            ),
+                                        );
+                                    }
+                                }
+                                if let Err(e) =
+                                    crate::file_opener::launch_app_with(&app, &paths, &display)
+                                {
+                                    report_open_error(&open_status, &e);
+                                }
+                            },
+                        );
+                    }
                 }
             });
             action_group.add_action(&action);
@@ -673,6 +770,75 @@ impl RavenWindow {
             action_group.add_action(&action);
         }
 
+        // file.plugin-action((plugin_id, action)): hand the selection to the
+        // plugin that registered the action. The selection is published first
+        // so a plugin asking get_selection sees exactly what it was run on.
+        {
+            let file_list = file_list.clone();
+            let cmd_tx = command_tx.clone();
+            let action = gio::SimpleAction::new(
+                "plugin-action",
+                Some(glib::VariantTy::new("(ss)").expect("valid variant type")),
+            );
+            action.connect_activate(move |_, parameter| {
+                let Some((plugin_id, name)) = parameter.and_then(|v| v.get::<(String, String)>())
+                else {
+                    return;
+                };
+                let selected = get_selected_entries(&file_list.get());
+                let shown = local_path_strings(&selected);
+                raven_plugin::selection::SharedSelection::global().set(shown);
+                let _ = cmd_tx.send(AppCommand::RunPluginAction {
+                    plugin_id,
+                    action: name,
+                    paths: selected
+                        .iter()
+                        .filter_map(|e| e.path.as_local_path().cloned())
+                        .collect(),
+                });
+            });
+            action_group.add_action(&action);
+        }
+
+        // file.open_containing_folder: show the selection in its own folder, for
+        // listings that are not a folder (Recent, search results). Enabled on
+        // right-click only when it would go somewhere else.
+        let reveal_action = gio::SimpleAction::new("open_containing_folder", None);
+        {
+            let file_list = file_list.clone();
+            let state = state.clone();
+            let cmd_tx = command_tx.clone();
+            reveal_action.connect_activate(move |_, _| {
+                let selected = get_selected_paths(&file_list.get());
+                let Some(parent) = selected.first().and_then(|p| p.parent()) else {
+                    return;
+                };
+                // A reveal selects within one folder: the first item's.
+                let paths: Vec<RavenPath> = selected
+                    .into_iter()
+                    .filter(|p| p.parent().as_ref() == Some(&parent))
+                    .collect();
+                let pane_id = active_pane_id(&state);
+                {
+                    let mut s = state.borrow_mut();
+                    if let Some(pane) = s.pane_by_id_mut(pane_id) {
+                        pane.navigate_to(parent.clone());
+                        // Pending rather than RevealItems: its SelectItems would
+                        // land while the old listing (Recent, search results)
+                        // is still on screen, match the file there and be spent
+                        // before the folder arrives. DirectoryLoaded applies it.
+                        pane.pending_selection = paths;
+                        pane.pending_properties = false;
+                    }
+                }
+                let _ = cmd_tx.send(AppCommand::Navigate {
+                    path: parent,
+                    pane_id,
+                });
+            });
+            action_group.add_action(&reveal_action);
+        }
+
         // Register on the Stack itself so the PopoverMenu (parented to the Stack)
         // can resolve "file.*" actions by walking up the widget tree.
         for pane_view in [&views.left, &views.right] {
@@ -682,6 +848,22 @@ impl RavenWindow {
                 .insert_action_group("file", Some(&action_group));
             for list_widget in pane_view.list_widgets() {
                 list_widget.insert_action_group("file", Some(&action_group));
+            }
+            // Below "Open", hidden whenever the action is disabled.
+            if let Some(menu) = pane_view
+                .context_menu
+                .popover
+                .menu_model()
+                .and_downcast::<gio::Menu>()
+            {
+                let item = gio::MenuItem::new(
+                    Some("Open Containing Folder"),
+                    Some("file.open_containing_folder"),
+                );
+                item.set_attribute_value("hidden-when", Some(&"action-disabled".to_variant()));
+                let section = gio::Menu::new();
+                section.append_item(&item);
+                menu.insert_section(1, None, &section);
             }
         }
 
@@ -703,6 +885,7 @@ impl RavenWindow {
             let file_list_for_released = file_list_for_ctx.clone();
             let state = state.clone();
             let context_selected_tags = context_selected_tags.clone();
+            let reveal_action = reveal_action.clone();
             let gesture = gtk::GestureClick::new();
             gesture.set_button(3); // Right click
 
@@ -746,6 +929,17 @@ impl RavenWindow {
                     let selected = get_selected_entries(&file_list_for_released);
                     let actions = state.borrow().custom_actions.clone();
                     context_menu.update_custom_actions(&actions, &selected);
+                    // The right-click made this pane the active one.
+                    let elsewhere = {
+                        let s = state.borrow();
+                        let pane = s.active_tab().active_pane();
+                        !selected.is_empty()
+                            && (pane.recent
+                                || selected
+                                    .iter()
+                                    .any(|e| e.path.parent().as_ref() != Some(&pane.current_path)))
+                    };
+                    reveal_action.set_enabled(elsewhere);
                 }
                 if let Some(entry) = get_primary_selected_entry(&file_list_for_released) {
                     let config = state.borrow().config.clone();
@@ -768,32 +962,146 @@ impl RavenWindow {
             view_widget.add_controller(gesture);
         }
 
-        // Preview panel (initially hidden)
-        let preview_separator = gtk::Separator::new(gtk::Orientation::Vertical);
-        preview_separator.set_visible(false);
-        let preview_panel = Rc::new(PreviewPanel::new());
+        // Preview panel, hidden until toggled. It shares the panes' space
+        // through a Paned so it can be dragged wider; its width and whether it
+        // is open are kept in the config across restarts.
+        let preview_panel = PreviewPanel::new();
         preview_panel.widget.set_visible(false);
-
-        content_box.append(&preview_separator);
-        content_box.append(&preview_panel.widget);
+        let preview_paned = gtk::Paned::new(gtk::Orientation::Horizontal);
+        preview_paned.set_hexpand(true);
+        preview_paned.set_vexpand(true);
+        // Resizing the window resizes the panes, not the panel.
+        preview_paned.set_resize_start_child(true);
+        preview_paned.set_resize_end_child(false);
+        preview_paned.set_shrink_start_child(false);
+        preview_paned.set_shrink_end_child(false);
+        // The panes were put in the content area above; move them into the
+        // Paned, beside the panel.
+        content_box.remove(&views.paned);
+        preview_paned.set_start_child(Some(&views.paned));
+        preview_paned.set_end_child(Some(&preview_panel.widget));
+        content_box.append(&preview_paned);
 
         let preview_btn = gtk::ToggleButton::new();
         preview_btn.set_icon_name("sidebar-show-right-symbolic");
+        preview_btn.add_css_class("flat");
         preview_btn.set_tooltip_text(Some("Preview panel (Space)"));
         header.pack_end(&preview_btn);
         {
             let panel = preview_panel.clone();
-            let separator = preview_separator.clone();
+            let paned = preview_paned.clone();
             let views = views.clone();
+            let state = state.clone();
             let cmd_tx = command_tx.clone();
             preview_btn.connect_toggled(move |btn| {
                 let show = btn.is_active();
                 panel.widget.set_visible(show);
-                separator.set_visible(show);
+                let width = {
+                    let mut s = state.borrow_mut();
+                    if s.config.appearance.preview_panel_visible != show {
+                        s.config.appearance.preview_panel_visible = show;
+                        let _ = s.config.save();
+                    }
+                    s.config.appearance.preview_panel_width
+                };
                 if show {
+                    place_preview_divider(&paned, width);
                     preview_selection(&views, &panel, &cmd_tx);
                 }
             });
+        }
+        // Remember the width the panel is dragged to, saved once the drag
+        // settles rather than on every pixel. Positions GTK picks by itself
+        // (before anything was placed) are not the user's choice.
+        {
+            let panel = preview_panel.clone();
+            let state = state.clone();
+            let pending: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+            preview_paned.connect_position_notify(move |paned| {
+                let total = paned.width();
+                if !panel.widget.is_visible() || !paned.is_position_set() || total <= 0 {
+                    return;
+                }
+                let width = total - paned.position();
+                {
+                    let mut s = state.borrow_mut();
+                    if width < 1 || s.config.appearance.preview_panel_width == width {
+                        return;
+                    }
+                    s.config.appearance.preview_panel_width = width;
+                }
+                if let Some(id) = pending.borrow_mut().take() {
+                    id.remove();
+                }
+                let state = state.clone();
+                let fired = pending.clone();
+                let id = glib::timeout_add_local_once(
+                    std::time::Duration::from_millis(500),
+                    move || {
+                        fired.borrow_mut().take();
+                        let _ = state.borrow().config.save();
+                    },
+                );
+                *pending.borrow_mut() = Some(id);
+            });
+        }
+        let reopen_preview = state.borrow().config.appearance.preview_panel_visible;
+        if reopen_preview {
+            preview_btn.set_active(true);
+        }
+
+        // Publish the active pane's selection for plugins and D-Bus clients:
+        // on every selection or listing change in either pane, and when the
+        // other pane becomes active. Coalesced into one idle callback so a
+        // select-all or a long arrow-key run costs one walk of the list.
+        {
+            let scheduled = Rc::new(std::cell::Cell::new(false));
+            let schedule: Rc<dyn Fn()> = {
+                let views = views.clone();
+                let scheduled = scheduled.clone();
+                Rc::new(move || {
+                    if scheduled.replace(true) {
+                        return;
+                    }
+                    let views = views.clone();
+                    let scheduled = scheduled.clone();
+                    glib::idle_add_local_once(move || {
+                        scheduled.set(false);
+                        let selected = get_selected_entries(&views.active().file_list);
+                        raven_plugin::selection::SharedSelection::global()
+                            .set(local_path_strings(&selected));
+                    });
+                })
+            };
+            for side in [crate::state::PaneSide::Left, crate::state::PaneSide::Right] {
+                let view = views.view(side);
+                {
+                    let schedule = schedule.clone();
+                    view.file_list
+                        .selection
+                        .connect_selection_changed(move |_, _, _| schedule());
+                }
+                {
+                    let schedule = schedule.clone();
+                    view.file_list
+                        .selection
+                        .connect_items_changed(move |_, _, _, _| schedule());
+                }
+                let focus = gtk::EventControllerFocus::new();
+                {
+                    let schedule = schedule.clone();
+                    focus.connect_enter(move |_| schedule());
+                }
+                view.container.add_controller(focus);
+                let click = gtk::GestureClick::new();
+                click.set_button(0);
+                click.set_propagation_phase(gtk::PropagationPhase::Capture);
+                {
+                    let schedule = schedule.clone();
+                    click.connect_pressed(move |_, _, _, _| schedule());
+                }
+                view.container.add_controller(click);
+            }
         }
 
         // Follow the selection while the panel is open. Debounced so holding
@@ -828,9 +1136,45 @@ impl RavenWindow {
             }
         }
 
+        // Focus or a click moving to the other pane makes it the active one
+        // (PaneViews does that); the preview follows. Deferred so it runs
+        // after PaneViews has updated the active side.
+        for side in [crate::state::PaneSide::Left, crate::state::PaneSide::Right] {
+            let container = views.view(side).container.clone();
+            let hook = {
+                let state = state.clone();
+                let views = views.clone();
+                let panel = preview_panel.clone();
+                let cmd_tx = command_tx.clone();
+                // Cheap when nothing changed: the selection already shown is
+                // not asked for again, and a valid preview is kept.
+                move || {
+                    let state = state.clone();
+                    let views = views.clone();
+                    let panel = panel.clone();
+                    let cmd_tx = cmd_tx.clone();
+                    glib::idle_add_local_once(move || {
+                        sync_preview(&state, &views, &panel, &cmd_tx);
+                    });
+                }
+            };
+            let focus = gtk::EventControllerFocus::new();
+            {
+                let hook = hook.clone();
+                focus.connect_enter(move |_| hook());
+            }
+            container.add_controller(focus);
+            let click = gtk::GestureClick::new();
+            click.set_button(0);
+            click.set_propagation_phase(gtk::PropagationPhase::Capture);
+            click.connect_pressed(move |_, _, _, _| hook());
+            container.add_controller(click);
+        }
+
         {
             let state = state.clone();
             let cmd_tx = command_tx.clone();
+            let open_status = open_status.clone();
             preview_panel.connect_open(move |path| {
                 if path.as_local_path().is_some_and(|p| p.is_dir()) {
                     let pane_id = active_pane_id(&state);
@@ -843,7 +1187,9 @@ impl RavenWindow {
                     });
                 } else {
                     let config = state.borrow().config.clone();
-                    crate::file_opener::open_file(path, &config);
+                    if let Err(e) = crate::file_opener::try_open_file(path, &config) {
+                        report_open_error(&open_status, &e);
+                    }
                 }
             });
         }
@@ -856,26 +1202,24 @@ impl RavenWindow {
 
         // --- Status bar ---
         let status_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        status_bar.set_margin_start(8);
-        status_bar.set_margin_end(8);
-        status_bar.set_margin_top(4);
-        status_bar.set_margin_bottom(4);
+        status_bar.add_css_class("status-bar");
         let status_label = gtk::Label::new(Some("Ready"));
         status_label.set_halign(gtk::Align::Start);
         status_label.set_hexpand(true);
-        status_label.add_css_class("dim-label");
+        status_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
         status_bar.append(&status_label);
+        *open_status.borrow_mut() = Some(status_label.clone());
 
         // Disk usage status indicator (initially hidden)
         let disk_usage_status = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         disk_usage_status.set_visible(false);
 
         let du_label = gtk::Label::new(Some("Calculating..."));
-        du_label.add_css_class("dim-label");
         disk_usage_status.append(&du_label);
 
         let disk_usage_bar = gtk::ProgressBar::new();
         disk_usage_bar.set_width_request(120);
+        disk_usage_bar.set_valign(gtk::Align::Center);
         disk_usage_status.append(&disk_usage_bar);
 
         let du_cancel_btn = gtk::Button::from_icon_name("process-stop-symbolic");
@@ -949,7 +1293,13 @@ impl RavenWindow {
         // --- Tab bar callbacks ---
         {
             let views = views.clone();
-            tab_bar.set_on_tab_changed(move |_| views.show_active_tab());
+            let state = state.clone();
+            let panel = preview_panel.clone();
+            let cmd_tx = command_tx.clone();
+            tab_bar.set_on_tab_changed(move |_| {
+                views.show_active_tab();
+                sync_preview(&state, &views, &panel, &cmd_tx);
+            });
         }
 
         // --- Keyboard shortcuts, from Settings > Keybindings ---
@@ -1034,6 +1384,33 @@ impl RavenWindow {
             });
         }
 
+        // Sidebar "Recent": list recently used files in the active pane.
+        {
+            let views = views.clone();
+            let state = state.clone();
+            let tab_bar = tab_bar.clone();
+            let search_bar = search_bar.clone();
+            let status_label = status_label.clone();
+            let panel = preview_panel.clone();
+            let cmd_tx = command_tx.clone();
+            // Weak: the sidebar owns this handler.
+            let sidebar_weak = Rc::downgrade(&sidebar);
+            sidebar.set_recent_handler(move || {
+                let pane_id = views.active_pane_id();
+                search_bar.clear();
+                if let Some(sidebar) = sidebar_weak.upgrade() {
+                    sidebar.clear_tag_filter();
+                }
+                // The count arrives once the files have been checked.
+                let status_label = status_label.clone();
+                views.show_recent(pane_id, move |count| {
+                    status_label.set_text(&format!("{} recent files", count));
+                });
+                tab_bar.refresh();
+                sync_preview(&state, &views, &panel, &cmd_tx);
+            });
+        }
+
         // Request container info on startup
         let _ = command_tx.send(AppCommand::GetContainerInfo);
 
@@ -1056,6 +1433,18 @@ impl RavenWindow {
             organize_dialog,
             conflict_dialogs: RefCell::new(HashMap::new()),
             connect_dialog,
+            plugin_actions: RefCell::new(Vec::new()),
+            preview_btn: preview_btn.clone(),
+            view_buttons: [list_btn.clone(), icons_btn.clone(), previews_btn.clone()],
+        }
+    }
+
+    /// Rebuild both panes' "Plugins" submenus from the last reported actions.
+    fn refresh_plugin_menus(&self) {
+        let actions = self.plugin_actions.borrow();
+        let names = self.state.borrow().loaded_plugins.clone();
+        for view in [&self.views.left, &self.views.right] {
+            view.context_menu.update_plugin_actions(&actions, &names);
         }
     }
 
@@ -1130,7 +1519,9 @@ impl RavenWindow {
         let (paths, show_properties) = {
             let state = self.state.borrow();
             match state.pane_by_id(pane_id) {
-                Some(pane) if !pane.pending_selection.is_empty() => {
+                // Recent may list the file too, but the reveal is waiting on
+                // its folder, which is still loading.
+                Some(pane) if !pane.pending_selection.is_empty() && !pane.recent => {
                     (pane.pending_selection.clone(), pane.pending_properties)
                 }
                 _ => return,
@@ -1141,7 +1532,15 @@ impl RavenWindow {
             return;
         };
         if view.file_list.select_paths(&paths).is_none() {
-            return;
+            // The quick filter may be hiding the target in this very folder;
+            // a reveal outranks a filter, so drop it and try again.
+            if !(view.file_list.is_quick_filtered() && view.file_list.holds_any(&paths)) {
+                return;
+            }
+            view.clear_quick_filter();
+            if view.file_list.select_paths(&paths).is_none() {
+                return;
+            }
         }
 
         {
@@ -1176,12 +1575,16 @@ impl RavenWindow {
                         // A new listing arrives unfiltered, and its status follows.
                         pane.clear_filters();
                         pane.vcs_statuses.clear();
+                        // A folder listing always ends the Recent view.
+                        pane.recent = false;
                     }
                     let tab_title = path.file_name().unwrap_or("/").to_string();
                     state.active_tab_mut().title = tab_title;
                 }
 
                 self.views.sync_layout();
+                // Another folder ends the quick filter; a reload keeps it.
+                self.views.sync_quick_filter(pane_id);
                 if let Some(view) = self.views.view_for_pane(pane_id) {
                     view.path_bar.set_path(&path, &self.command_tx, pane_id);
                 }
@@ -1193,6 +1596,8 @@ impl RavenWindow {
                 self.refresh_pane_view(pane_id);
                 // The listing this reveal was waiting on may be this one.
                 self.apply_pending_selection(pane_id);
+                // A new folder, tab or reload: the preview may no longer apply.
+                sync_preview(&self.state, &self.views, &self.preview_panel, &self.command_tx);
             }
 
             AppEvent::SelectItems {
@@ -1351,6 +1756,8 @@ impl RavenWindow {
                     .insert(plugin_id, name.clone());
                 self.status_label
                     .set_text(&format!("Plugin loaded: {}", name));
+                // Submenu group titles use plugin names.
+                self.refresh_plugin_menus();
             }
 
             AppEvent::PluginUnloaded { plugin_id } => {
@@ -1364,6 +1771,11 @@ impl RavenWindow {
                 tracing::error!("Plugin {} error: {}", plugin_id, error);
                 self.status_label
                     .set_text(&format!("Plugin error: {}", error));
+            }
+
+            AppEvent::PluginActionsChanged { actions } => {
+                *self.plugin_actions.borrow_mut() = actions;
+                self.refresh_plugin_menus();
             }
 
             // --- Network events ---
@@ -1400,12 +1812,13 @@ impl RavenWindow {
                     .set_text(&format!("Disconnected from {}", id));
 
                 // A pane still browsing that server has nowhere to go but home.
+                let remaining = self.sidebar.remote_ids();
                 let stranded: Vec<u32> = {
                     let s = self.state.borrow();
                     s.tabs
                         .iter()
                         .flat_map(|tab| std::iter::once(&tab.pane).chain(tab.secondary_pane.iter()))
-                        .filter(|pane| sftp_connection_key(&pane.current_path).as_deref() == Some(id.as_str()))
+                        .filter(|pane| pane_uses_connection(&pane.current_path, &id, &remaining))
                         .map(|pane| pane.id)
                         .collect()
                 };
@@ -1711,8 +2124,22 @@ fn get_selected_entries(file_list: &FileListView) -> Vec<FileEntry> {
     entries
 }
 
+/// Log a failure to open a file and show it in the status bar, when the
+/// window has one yet.
+fn report_open_error(status: &Rc<RefCell<Option<gtk::Label>>>, message: &str) {
+    tracing::warn!("{}", message);
+    if let Some(label) = status.borrow().as_ref() {
+        label.set_text(message);
+    }
+}
+
 fn get_primary_selected_entry(file_list: &FileListView) -> Option<FileEntry> {
     get_selected_entries(file_list).into_iter().next()
+}
+
+/// The selection as published to plugins and D-Bus clients.
+fn local_path_strings(entries: &[FileEntry]) -> Vec<String> {
+    raven_plugin::selection::local_path_strings(entries.iter().map(|e| &e.path))
 }
 
 fn get_selected_paths(file_list: &FileListView) -> Vec<RavenPath> {
@@ -2049,18 +2476,81 @@ struct KeyContext {
 }
 
 /// Show the active pane's selected file in the preview panel, or clear the
-/// panel when nothing is selected.
+/// panel when nothing is selected. A file already shown or on its way is not
+/// asked for again: a click reaches here both through sync_preview and the
+/// debounced selection handler, and each request is a full provider run.
 fn preview_selection(
     views: &PaneViews,
-    panel: &PreviewPanel,
+    panel: &Rc<PreviewPanel>,
     cmd_tx: &tokio::sync::mpsc::UnboundedSender<AppCommand>,
 ) {
     match get_primary_selected_entry(&views.active().file_list) {
+        Some(entry) if panel.is_showing(&entry.path) => {}
         Some(entry) => {
             panel.request(&entry.path);
             let _ = cmd_tx.send(AppCommand::GeneratePreview { path: entry.path });
         }
         None => panel.clear(),
+    }
+}
+
+/// Bring an open preview panel in line with the active pane after something
+/// other than a selection change: the pane navigated or reloaded, or another
+/// pane or tab became active. The active pane's selection is previewed when
+/// there is one. Otherwise a preview of a file that is gone, or that is not in
+/// the active pane's folder, is cleared -- a reload that merely dropped the
+/// selection leaves a still-valid preview alone.
+fn sync_preview(
+    state: &AppState,
+    views: &PaneViews,
+    panel: &Rc<PreviewPanel>,
+    cmd_tx: &tokio::sync::mpsc::UnboundedSender<AppCommand>,
+) {
+    if !panel.widget.is_visible() {
+        return;
+    }
+    if let Some(entry) = get_primary_selected_entry(&views.active().file_list) {
+        if !panel.is_showing(&entry.path) {
+            panel.request(&entry.path);
+            let _ = cmd_tx.send(AppCommand::GeneratePreview { path: entry.path });
+        }
+        return;
+    }
+    let Some(shown) = panel.shown_path() else {
+        return;
+    };
+    let (folder, recent) = {
+        let s = state.borrow();
+        let pane = s.active_tab().active_pane();
+        (pane.current_path.clone(), pane.recent)
+    };
+    // Recent lists files from anywhere, so any of them may be on show.
+    let still_valid = (recent || crate::widgets::preview_panel::belongs_to_folder(&shown, &folder))
+        && shown.as_local_path().is_some_and(|p| p.exists());
+    if !still_valid {
+        panel.clear();
+    }
+}
+
+/// Put the divider so the preview panel is `panel_width` wide. The Paned has
+/// no width before its first layout (at startup), so then this waits for one.
+fn place_preview_divider(paned: &gtk::Paned, panel_width: i32) {
+    let place = move |paned: &gtk::Paned| {
+        let total = paned.width();
+        if total <= 0 {
+            return false;
+        }
+        paned.set_position((total - panel_width).max(0));
+        true
+    };
+    if !place(paned) {
+        paned.add_tick_callback(move |paned, _| {
+            if place(paned) {
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
+        });
     }
 }
 
@@ -2087,16 +2577,8 @@ fn dispatch_key_action(ctx: &KeyContext, action: &str) -> bool {
             }
             let _ = ctx.cmd_tx.send(AppCommand::Navigate { path: home, pane_id });
         }
-        "refresh" => {
-            let path = ctx
-                .state
-                .borrow()
-                .pane_by_id(pane_id)
-                .map(|p| p.current_path.clone());
-            if let Some(path) = path {
-                let _ = ctx.cmd_tx.send(AppCommand::Navigate { path, pane_id });
-            }
-        }
+        // Reloads the folder, or the recent list while Recent is shown.
+        "refresh" => ctx.views.reload(pane_id),
         "edit_path" => ctx.views.active().path_bar.toggle_edit_mode(),
         "toggle_hidden" => ctx.hidden_btn.set_active(!ctx.hidden_btn.is_active()),
         "toggle_search" => ctx.search_btn.set_active(!ctx.search_btn.is_active()),
@@ -2258,6 +2740,24 @@ fn sftp_connection_key(path: &RavenPath) -> Option<String> {
     }
 }
 
+/// Whether `path` is browsed through the connection `id`. SMB ids name a
+/// share (`smb://host/share`) or a whole server (`smb://host/`), which
+/// covers every share on it.
+///
+/// `remaining` are the connection ids still open. The backend logs a server
+/// out once none of its ids remain, which strands every pane on that server,
+/// including one on a share reached from the share list without its own id.
+fn pane_uses_connection(path: &RavenPath, id: &str, remaining: &[String]) -> bool {
+    if let RavenPath::Smb { host, share, .. } = path {
+        let server = format!("smb://{}/", host.to_ascii_lowercase());
+        if id == server || id == format!("{}{}", server, share) {
+            return true;
+        }
+        return id.starts_with(&server) && !remaining.iter().any(|r| r.starts_with(&server));
+    }
+    sftp_connection_key(path).as_deref() == Some(id)
+}
+
 fn navigate_back(
     state: &AppState,
     command_tx: &tokio::sync::mpsc::UnboundedSender<AppCommand>,
@@ -2299,6 +2799,15 @@ fn navigate_up(
     command_tx: &tokio::sync::mpsc::UnboundedSender<AppCommand>,
     pane_id: u32,
 ) {
+    // Up from Recent is the folder behind it, not that folder's parent.
+    let folder = state
+        .borrow_mut()
+        .pane_by_id_mut(pane_id)
+        .and_then(|pane| pane.leave_recent());
+    if let Some(path) = folder {
+        let _ = command_tx.send(AppCommand::Navigate { path, pane_id });
+        return;
+    }
     let parent = {
         let s = state.borrow();
         if let Some(pane) = s.pane_by_id(pane_id) {
@@ -2334,5 +2843,31 @@ fn format_size(bytes: u64) -> String {
         format!("{:.1} KiB", bytes as f64 / KIB as f64)
     } else {
         format!("{} B", bytes)
+    }
+}
+
+#[cfg(test)]
+mod pane_connection_tests {
+    use super::*;
+
+    fn smb(host: &str, share: &str) -> RavenPath {
+        RavenPath::Smb {
+            host: host.into(),
+            share: share.into(),
+            path: "/".into(),
+        }
+    }
+
+    #[test]
+    fn smb_panes_are_stranded_when_their_server_logs_out() {
+        let docs = smb("NAS", "Docs");
+        // The disconnected id itself, or the server's share list.
+        assert!(pane_uses_connection(&docs, "smb://nas/Docs", &["smb://nas/Media".into()]));
+        assert!(pane_uses_connection(&docs, "smb://nas/", &["smb://nas/Media".into()]));
+        // Another share on a server that stays logged in keeps browsing.
+        assert!(!pane_uses_connection(&docs, "smb://nas/Media", &["smb://nas/Other".into()]));
+        // The last location on the server is gone, so the backend logged out.
+        assert!(pane_uses_connection(&docs, "smb://nas/Media", &[]));
+        assert!(!pane_uses_connection(&docs, "smb://nas2/Media", &[]));
     }
 }

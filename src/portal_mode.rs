@@ -65,8 +65,8 @@ pub fn run() -> glib::ExitCode {
         };
 
         let appearance = AppConfig::load().appearance;
-        raven_ui::themes::load_base_css();
-        raven_ui::themes::apply_theme(appearance.theme);
+        // The same look as the file manager, following the desktop's.
+        raven_ui::themes::init(appearance.theme);
 
         let hold = app.hold();
         let open_dialogs = Rc::new(Cell::new(0u32));

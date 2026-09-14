@@ -8,10 +8,13 @@ use libadwaita::prelude::*;
 
 use raven_core::automation_types::SshAuth;
 use raven_core::commands::AppCommand;
+use raven_vfs::smb::parse_smb_url;
 
-/// The "Connect to Server" dialog: collects an SFTP destination and sends
-/// `ConnectSftp`. It stays open, showing the error, when the connection
-/// fails, and the window closes it once `RemoteConnected` arrives.
+/// The "Connect to Server" dialog: collects an SFTP or SMB destination and
+/// sends `ConnectSftp` or `ConnectSmb`. It stays open, showing the error,
+/// when the connection fails, and the window closes it once
+/// `RemoteConnected` arrives. Passwords go into the command and nowhere
+/// else: nothing typed here is saved.
 pub struct ConnectDialog {
     pub window: adw::Window,
     form: gtk::Box,
@@ -20,6 +23,10 @@ pub struct ConnectDialog {
     error_label: gtk::Label,
     on_closed: RefCell<Option<Box<dyn Fn()>>>,
 }
+
+/// Protocols, in the order of the dropdown.
+const PROTO_SFTP: u32 = 0;
+const PROTO_SMB: u32 = 1;
 
 /// Which authentication rows are shown, in the order of the dropdown.
 const AUTH_AGENT: u32 = 0;
@@ -52,7 +59,15 @@ impl ConnectDialog {
 
         let server_group = adw::PreferencesGroup::new();
         server_group.set_title("Server");
-        server_group.set_description(Some("SFTP over SSH"));
+
+        let protocol_row = adw::ComboRow::new();
+        protocol_row.set_title("Protocol");
+        protocol_row.set_model(Some(&gtk::StringList::new(&[
+            "SFTP (SSH)",
+            "SMB (Windows or Samba share)",
+        ])));
+        protocol_row.set_selected(PROTO_SFTP);
+        server_group.add(&protocol_row);
 
         let host_row = adw::EntryRow::new();
         host_row.set_title("Host");
@@ -66,6 +81,12 @@ impl ConnectDialog {
         );
         port_row.set_title("Port");
         server_group.add(&port_row);
+
+        let share_row = adw::EntryRow::new();
+        share_row.set_title("Share (optional, empty lists the server's shares)");
+        share_row.set_activates_default(true);
+        share_row.set_visible(false);
+        server_group.add(&share_row);
 
         let user_row = adw::EntryRow::new();
         user_row.set_title("Username");
@@ -92,6 +113,12 @@ impl ConnectDialog {
         auth_row.set_selected(AUTH_AGENT);
         auth_group.add(&auth_row);
 
+        let domain_row = adw::EntryRow::new();
+        domain_row.set_title("Domain or workgroup (optional)");
+        domain_row.set_activates_default(true);
+        domain_row.set_visible(false);
+        auth_group.add(&domain_row);
+
         let password_row = adw::PasswordEntryRow::new();
         password_row.set_title("Password");
         password_row.set_activates_default(true);
@@ -112,15 +139,64 @@ impl ConnectDialog {
         auth_group.add(&passphrase_row);
         form.append(&auth_group);
 
-        {
+        // Show the rows the chosen protocol and method use.
+        let update_rows: Rc<dyn Fn()> = {
+            let protocol_row = protocol_row.clone();
+            let server_group = server_group.clone();
+            let host_row = host_row.clone();
+            let port_row = port_row.clone();
+            let share_row = share_row.clone();
+            let user_row = user_row.clone();
+            let folder_row = folder_row.clone();
+            let auth_row = auth_row.clone();
+            let domain_row = domain_row.clone();
             let password_row = password_row.clone();
             let key_row = key_row.clone();
             let passphrase_row = passphrase_row.clone();
-            auth_row.connect_selected_notify(move |row| {
-                let method = row.selected();
-                password_row.set_visible(method == AUTH_PASSWORD);
-                key_row.set_visible(method == AUTH_KEY);
-                passphrase_row.set_visible(method == AUTH_KEY);
+            Rc::new(move || {
+                let smb = protocol_row.selected() == PROTO_SMB;
+                let method = auth_row.selected();
+                if smb {
+                    server_group.set_description(Some(
+                        "SMB2/3; the host field also takes smb://host/share/folder",
+                    ));
+                    host_row.set_title("Host or smb:// address");
+                    user_row.set_title("Username (empty for a guest login)");
+                    folder_row.set_title("Folder inside the share (optional)");
+                } else {
+                    server_group.set_description(Some("SFTP over SSH"));
+                    host_row.set_title("Host");
+                    user_row.set_title("Username");
+                    folder_row.set_title("Folder (optional, defaults to the login directory)");
+                }
+                port_row.set_visible(!smb);
+                share_row.set_visible(smb);
+                auth_row.set_visible(!smb);
+                domain_row.set_visible(smb);
+                password_row.set_visible(smb || method == AUTH_PASSWORD);
+                key_row.set_visible(!smb && method == AUTH_KEY);
+                passphrase_row.set_visible(!smb && method == AUTH_KEY);
+            })
+        };
+        update_rows();
+        {
+            let update_rows = update_rows.clone();
+            auth_row.connect_selected_notify(move |_| update_rows());
+        }
+        {
+            let update_rows = update_rows.clone();
+            protocol_row.connect_selected_notify(move |_| update_rows());
+        }
+        {
+            // Pasting an smb:// address picks the protocol by itself.
+            let protocol_row = protocol_row.clone();
+            host_row.connect_changed(move |row| {
+                let text = row.text().to_ascii_lowercase();
+                if text.starts_with("smb://") || text.starts_with("\\\\") {
+                    protocol_row.set_selected(PROTO_SMB);
+                } else if text.starts_with("sftp://") || text.starts_with("ssh://") {
+                    protocol_row.set_selected(PROTO_SFTP);
+                }
             });
         }
 
@@ -171,6 +247,38 @@ impl ConnectDialog {
             let host_row = host_row.clone();
             let user_row = user_row.clone();
             dialog.connect_btn.clone().connect_clicked(move |_| {
+                if protocol_row.selected() == PROTO_SMB {
+                    let target = match parse_smb_target(
+                        &host_row.text(),
+                        &share_row.text(),
+                        &folder_row.text(),
+                        &user_row.text(),
+                        &domain_row.text(),
+                    ) {
+                        Ok(target) => target,
+                        Err(reason) => {
+                            dialog.show_error(reason);
+                            return;
+                        }
+                    };
+                    // A password spelled out in an smb:// address wins, like
+                    // everything else in the host field.
+                    let password = target
+                        .password
+                        .unwrap_or_else(|| password_row.text().to_string());
+                    let guest = target.user.is_none();
+                    dialog.set_busy(true);
+                    let _ = command_tx.send(AppCommand::ConnectSmb {
+                        host: target.host,
+                        share: target.share,
+                        path: target.path,
+                        user: target.user,
+                        password: (!guest && !password.is_empty()).then_some(password),
+                        domain: target.domain,
+                    });
+                    return;
+                }
+
                 let target = match parse_target(
                     &host_row.text(),
                     port_row.value() as u16,
@@ -311,6 +419,71 @@ fn parse_target(host_field: &str, port: u16, user_field: &str) -> Result<Target,
     Ok(Target { host, port, user })
 }
 
+/// An SMB destination, after the host field and the SMB rows have been read.
+#[derive(Debug, PartialEq, Eq)]
+struct SmbTarget {
+    host: String,
+    /// Empty to browse the share list.
+    share: String,
+    path: Option<String>,
+    /// `None` is a guest login.
+    user: Option<String>,
+    domain: Option<String>,
+    /// Only when the address itself carried one.
+    password: Option<String>,
+}
+
+/// Read the SMB rows. The host field may hold a whole
+/// `smb://[domain;]user@host/share/folder` address (or `\\host\share`), and
+/// whatever it spells out wins over the separate rows, as for SFTP.
+fn parse_smb_target(
+    host_field: &str,
+    share_field: &str,
+    folder_field: &str,
+    user_field: &str,
+    domain_field: &str,
+) -> Result<SmbTarget, &'static str> {
+    let url = parse_smb_url(host_field)?;
+
+    // The share row may itself hold "share/folder".
+    let mut share_parts = share_field
+        .split(['/', '\\'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let row_share = share_parts.next().unwrap_or_default().to_string();
+    let row_folder: Vec<&str> = share_parts
+        .chain(folder_field.split(['/', '\\']).map(str::trim).filter(|s| !s.is_empty()))
+        .collect();
+
+    let (share, path) = if url.share.is_empty() {
+        (row_share, row_folder.join("/"))
+    } else {
+        let url_folder = url.path.trim_matches('/').to_string();
+        let folder = if url_folder.is_empty() {
+            row_folder.join("/")
+        } else {
+            url_folder
+        };
+        (url.share, folder)
+    };
+    if share.is_empty() && !path.is_empty() {
+        return Err("A folder needs a share to be in");
+    }
+
+    let non_empty = |s: &str| Some(s.trim().to_string()).filter(|s| !s.is_empty());
+    let user = url.user.or_else(|| non_empty(user_field));
+    let domain = url.domain.or_else(|| non_empty(domain_field));
+
+    Ok(SmbTarget {
+        host: url.host,
+        share,
+        path: (!path.is_empty()).then_some(format!("/{}", path)),
+        user,
+        domain,
+        password: url.password,
+    })
+}
+
 fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -377,5 +550,50 @@ mod tests {
         assert!(expanded.ends_with(".ssh/id_ed25519"));
         assert!(!expanded.to_string_lossy().starts_with('~'));
         assert_eq!(expand_home("/abs/key"), PathBuf::from("/abs/key"));
+    }
+
+    #[test]
+    fn smb_rows_fill_in_a_plain_host() {
+        assert_eq!(
+            parse_smb_target("nas.local", " Media/Photos ", "2024/", "alice", ""),
+            Ok(SmbTarget {
+                host: "nas.local".into(),
+                share: "Media".into(),
+                path: Some("/Photos/2024".into()),
+                user: Some("alice".into()),
+                domain: None,
+                password: None,
+            })
+        );
+    }
+
+    #[test]
+    fn smb_address_in_the_host_field_wins() {
+        assert_eq!(
+            parse_smb_target("smb://WORK;bob:pw@nas/Docs/Q1", "Other", "ignored", "alice", "HOME"),
+            Ok(SmbTarget {
+                host: "nas".into(),
+                share: "Docs".into(),
+                path: Some("/Q1".into()),
+                user: Some("bob".into()),
+                domain: Some("WORK".into()),
+                password: Some("pw".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn smb_empty_user_is_a_guest_and_no_share_lists_shares() {
+        let target = parse_smb_target(r"\\nas", "", "", "  ", "").unwrap();
+        assert_eq!(target.share, "");
+        assert_eq!(target.path, None);
+        assert_eq!(target.user, None);
+    }
+
+    #[test]
+    fn smb_mistakes_are_reported() {
+        assert!(parse_smb_target("", "share", "", "", "").is_err());
+        assert!(parse_smb_target("nas", "", "folder", "", "").is_err());
+        assert!(parse_smb_target("sftp://nas", "share", "", "", "").is_err());
     }
 }

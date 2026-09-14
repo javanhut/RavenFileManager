@@ -33,8 +33,20 @@ pub fn show_conflict_dialog(
         .map(|p| p.to_string())
         .unwrap_or_default();
 
+    // Overwriting a folder with a folder merges: its other contents stay and
+    // only same-named files inside are replaced. Say so, rather than
+    // promising to replace "a file".
+    let merge = conflict.source_is_dir && conflict.dest_is_dir;
+    let (title, from_label, existing_label, replace_label) = if merge {
+        ("Merge Folders?", "Merge from:", "Existing folder:", "Merge")
+    } else if conflict.dest_is_dir {
+        ("Replace Folder?", "Replace with:", "Existing folder:", "Replace")
+    } else {
+        ("Replace File?", "Replace with:", "Existing file:", "Replace")
+    };
+
     let dialog = adw::Window::builder()
-        .title("Replace File?")
+        .title(title)
         .default_width(460)
         .modal(true)
         .transient_for(parent)
@@ -60,12 +72,22 @@ pub fn show_conflict_dialog(
     heading.set_xalign(0.0);
     content.append(&heading);
 
+    if merge {
+        let note = gtk::Label::new(Some(
+            "Merging keeps everything already in the folder. Files inside it that have the same name as incoming files are replaced without asking again.",
+        ));
+        note.set_halign(gtk::Align::Start);
+        note.set_xalign(0.0);
+        note.set_wrap(true);
+        content.append(&note);
+    }
+
     let details = gtk::Grid::new();
     details.set_row_spacing(4);
     details.set_column_spacing(12);
-    for (row, (what, path, size)) in [
-        ("Replace with:", &conflict.source, conflict.source_size),
-        ("Existing file:", &conflict.destination, conflict.dest_size),
+    for (row, (what, path, size, is_dir)) in [
+        (from_label, &conflict.source, conflict.source_size, conflict.source_is_dir),
+        (existing_label, &conflict.destination, conflict.dest_size, conflict.dest_is_dir),
     ]
     .into_iter()
     .enumerate()
@@ -76,7 +98,13 @@ pub fn show_conflict_dialog(
         what_label.set_valign(gtk::Align::Start);
         details.attach(&what_label, 0, row as i32, 1, 1);
 
-        let path_label = gtk::Label::new(Some(&format!("{} ({})", path, format_size(size))));
+        // A folder's own size is not the size of what is in it.
+        let text = if is_dir {
+            path.to_string()
+        } else {
+            format!("{} ({})", path, format_size(size))
+        };
+        let path_label = gtk::Label::new(Some(&text));
         path_label.set_halign(gtk::Align::Start);
         path_label.set_xalign(0.0);
         path_label.set_hexpand(true);
@@ -140,7 +168,7 @@ pub fn show_conflict_dialog(
     for (label, strategy, class) in [
         ("Skip", ConflictStrategy::Skip, None),
         ("Rename", ConflictStrategy::Rename, Some("suggested-action")),
-        ("Replace", ConflictStrategy::Overwrite, Some("destructive-action")),
+        (replace_label, ConflictStrategy::Overwrite, Some("destructive-action")),
     ] {
         let btn = gtk::Button::with_label(label);
         if let Some(class) = class {

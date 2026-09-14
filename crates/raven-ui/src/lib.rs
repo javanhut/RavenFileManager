@@ -1,5 +1,7 @@
 pub mod app;
+pub mod dnd;
 pub mod file_opener;
+pub mod recent;
 pub mod state;
 pub mod themes;
 pub mod thumbnails;

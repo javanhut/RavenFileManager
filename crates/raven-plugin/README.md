@@ -28,6 +28,29 @@ description = "A sample plugin"
 entry = "init.lua"
 ```
 
+## Context-menu actions
+
+Command plugins declare actions in `plugin.toml`; they appear under
+**Plugins** in the file context menu while the plugin is loaded:
+
+```toml
+[[actions]]
+name = "compress"
+label = "Compress to .zip"
+```
+
+Choosing one runs the entry point as `run.sh on_action <name> <path>...`
+with the selected local paths. `RAVEN_ACTION_PATHS_FILE` names a temporary
+file holding the same paths as NUL-terminated entries; when the selection is
+too large for the command line (over ~512 KiB) the paths are left off argv
+and only that file carries them.
+
+Every hook also receives the active pane's selection in
+`RAVEN_SELECTION_FILE` (NUL-terminated entries, always exact). The
+convenience copy `RAVEN_SELECTION` (one path per line) is unset when the
+list exceeds 64 KiB or a path contains a newline. Both files are deleted
+once the hook exits, e.g. `xargs -0 ... < "$RAVEN_ACTION_PATHS_FILE"`.
+
 ## Tests
 
 40 tests covering manifest parsing, plugin discovery, loading, and lifecycle.

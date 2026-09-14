@@ -48,8 +48,7 @@ impl Session {
                 let appearance = &self.state.borrow().config.appearance;
                 (appearance.theme, appearance.font_size, appearance.icon_size)
             };
-            themes::load_base_css();
-            themes::apply_theme(theme);
+            themes::init(theme);
             themes::apply_sizes(font_size, icon_size);
         }
 
@@ -71,6 +70,11 @@ impl Session {
                     window.handle_event(event);
                 }
             });
+        }
+
+        // Development aid only: renders the window's states to PNGs and exits.
+        if let Some(dir) = std::env::var_os("RAVEN_FM_SNAPSHOT").filter(|d| !d.is_empty()) {
+            window.start_snapshots(app, PathBuf::from(dir));
         }
 
         window

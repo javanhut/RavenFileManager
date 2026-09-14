@@ -288,6 +288,9 @@ struct Inner {
     up_button: gtk::Button,
     name_entry: gtk::Entry,
     status: gtk::Label,
+    places_box: gtk::ListBox,
+    /// The folder of each row of `places_box`, by row index.
+    place_paths: Vec<PathBuf>,
     done: RefCell<Option<DoneFn>>,
 }
 
@@ -430,22 +433,34 @@ impl FileChooserDialog {
         header.pack_end(&new_folder_button);
 
         // --- Places ---
+        // Built like the file manager's own sidebar (eyebrow heading, tinted
+        // tiles, the current folder's row selected), so the picker reads as
+        // the same app.
         let place_list = places();
+        let place_paths: Vec<PathBuf> = place_list.iter().map(|(_, _, p)| p.clone()).collect();
         let places_box = gtk::ListBox::new();
         places_box.add_css_class("navigation-sidebar");
         for (label, icon, _) in &place_list {
-            let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-            row.set_margin_start(4);
-            row.append(&gtk::Image::from_icon_name(icon));
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            row.set_margin_top(1);
+            row.set_margin_bottom(1);
+            row.append(&crate::widgets::sidebar::nav_tile(icon));
             let l = gtk::Label::new(Some(label));
+            l.set_halign(gtk::Align::Start);
             l.set_ellipsize(gtk::pango::EllipsizeMode::End);
             row.append(&l);
             places_box.append(&row);
         }
+        let places_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        places_column.add_css_class("places");
+        places_column.append(&crate::widgets::sidebar::section_heading("Places", true));
+        places_column.append(&places_box);
         let places_scroll = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
-            .child(&places_box)
+            .child(&places_column)
             .build();
+        // Raven Glass's sidebar, like the file manager's own places.
+        places_scroll.add_css_class("sidebar");
 
         // --- Location row ---
         let up_button = gtk::Button::from_icon_name("go-up-symbolic");
@@ -454,10 +469,8 @@ impl FileChooserDialog {
         location.set_hexpand(true);
         location.set_tooltip_text(Some("Type a path and press Enter (Ctrl+L)"));
         let location_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        location_row.set_margin_top(6);
-        location_row.set_margin_bottom(6);
-        location_row.set_margin_start(6);
-        location_row.set_margin_end(6);
+        location_row.add_css_class("location-row");
+        up_button.add_css_class("flat");
         location_row.append(&up_button);
         location_row.append(&location);
 
@@ -480,10 +493,7 @@ impl FileChooserDialog {
 
         // --- Bottom row: name and filter ---
         let bottom = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        bottom.set_margin_top(8);
-        bottom.set_margin_bottom(8);
-        bottom.set_margin_start(8);
-        bottom.set_margin_end(8);
+        bottom.add_css_class("chooser-footer");
         let name_entry = gtk::Entry::new();
         if mode == ChooserMode::Save {
             let name_label = gtk::Label::with_mnemonic("_Name");
@@ -522,9 +532,12 @@ impl FileChooserDialog {
             None
         };
 
+        // Opening with no filters to choose from leaves the footer with
+        // nothing in it; an empty strip under a hairline reads as a mistake.
+        bottom.set_visible(mode == ChooserMode::Save || filter_dropdown.is_some());
+
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content.append(&location_row);
-        content.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         content.append(&list_scroll);
         content.append(&status);
         content.append(&bottom);
@@ -556,6 +569,8 @@ impl FileChooserDialog {
             up_button: up_button.clone(),
             name_entry: name_entry.clone(),
             status,
+            places_box: places_box.clone(),
+            place_paths,
             done: RefCell::new(Some(Box::new(on_done))),
         });
         inner.navigate(&start);
@@ -739,6 +754,14 @@ impl Inner {
         self.dir_list.set_file(Some(&gio::File::for_path(path)));
         self.location.set_text(&path.to_string_lossy());
         self.up_button.set_sensitive(path.parent().is_some());
+        // The place being shown is the selected row, as in the main sidebar.
+        match self.place_paths.iter().position(|p| p == path) {
+            Some(index) => {
+                let row = self.places_box.row_at_index(index as i32);
+                self.places_box.select_row(row.as_ref());
+            }
+            None => self.places_box.unselect_all(),
+        }
     }
 
     fn go_up(&self) {
@@ -926,6 +949,12 @@ impl Inner {
             return;
         };
         let selection = paths.map(|paths| {
+            // Files picked here were used by the requesting application, so
+            // they belong in the recent list like files Raven opens itself.
+            // A save target may not exist yet; RecentManager adds it anyway.
+            for path in paths.iter().filter(|p| !p.is_dir()) {
+                crate::file_opener::record_recent(path);
+            }
             let folder = match self.mode {
                 ChooserMode::Save => paths.first().and_then(|p| p.parent()).map(Path::to_path_buf),
                 ChooserMode::SaveFiles => paths.first().cloned(),

@@ -6,6 +6,7 @@ use tracing::{debug, warn};
 use crate::cache::PreviewCache;
 use crate::directory::DirectoryPreview;
 use crate::image_preview::ImagePreview;
+use crate::pdf::PdfPreview;
 use crate::text::TextPreview;
 use crate::video::VideoPreview;
 use crate::{path_extension, require_local, PreviewProvider};
@@ -20,6 +21,7 @@ pub struct PreviewRouter {
     text: TextPreview,
     image: ImagePreview,
     video: VideoPreview,
+    document: PdfPreview,
     directory: DirectoryPreview,
     cache: Option<PreviewCache>,
 }
@@ -31,6 +33,7 @@ impl PreviewRouter {
             text: TextPreview::new(),
             image: ImagePreview::new(),
             video: VideoPreview::new(),
+            document: PdfPreview::new(),
             directory: DirectoryPreview::new(),
             cache: None,
         }
@@ -101,6 +104,11 @@ impl PreviewRouter {
                 return self.video.generate(path).await;
             }
 
+            if self.document.supports(&ext) {
+                debug!(path = %path, ext = %ext, "routing to document provider");
+                return self.document.generate(path).await;
+            }
+
             // No provider found for this extension
             debug!(path = %path, ext = %ext, "no provider for extension");
             return Ok(PreviewData::Unsupported {
@@ -159,6 +167,31 @@ mod tests {
                 assert!(mime_type.contains("xyz_unknown_ext"));
             }
             other => panic!("expected Unsupported, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pdf_routes_to_document() {
+        let _env = crate::thumbnail::CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("paper.PDF");
+        std::fs::write(&file, crate::pdf::sample_pdf(4, Some("A Paper"))).unwrap();
+        let router = PreviewRouter::new();
+        match router.preview(&RavenPath::local(&file)).await.unwrap() {
+            PreviewData::Document {
+                path,
+                thumbnail,
+                page_count,
+                title,
+            } => {
+                assert_eq!(path, file);
+                assert!(thumbnail.is_some_and(|t| t.is_file()));
+                assert_eq!(page_count, Some(4));
+                assert_eq!(title.as_deref(), Some("A Paper"));
+            }
+            other => panic!("expected Document, got {:?}", other),
         }
     }
 

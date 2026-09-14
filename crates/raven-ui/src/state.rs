@@ -40,6 +40,9 @@ pub struct PaneState {
     /// Version-control status of the listing's entries, by file name. Empty
     /// outside a repository or until the backend reports it.
     pub vcs_statuses: HashMap<String, GitFileStatus>,
+    /// The pane lists recently used files instead of `current_path`, which
+    /// keeps the folder it showed before so leaving the view returns there.
+    pub recent: bool,
 }
 
 impl PaneState {
@@ -57,7 +60,30 @@ impl PaneState {
             pending_selection: Vec::new(),
             pending_properties: false,
             vcs_statuses: HashMap::new(),
+            recent: false,
         }
+    }
+
+    /// Switch the listing to recently used files. Filters, selection and
+    /// version-control marks belong to a folder, so they go.
+    pub fn show_recent(&mut self, entries: Vec<FileEntry>) {
+        self.recent = true;
+        self.entries = entries;
+        self.clear_filters();
+        self.vcs_statuses.clear();
+        self.selection.clear();
+        self.clear_pending_selection();
+    }
+
+    /// Leave the recent view, returning the folder to load in its place.
+    /// `None` when the pane was not showing recent files.
+    pub fn leave_recent(&mut self) -> Option<RavenPath> {
+        if !self.recent {
+            return None;
+        }
+        self.recent = false;
+        self.selection.clear();
+        Some(self.current_path.clone())
     }
 
     /// Drop a reveal that has not been applied yet. Called whenever the user
@@ -104,6 +130,7 @@ impl PaneState {
     }
 
     pub fn navigate_to(&mut self, path: RavenPath) {
+        self.recent = false;
         self.history_back.push(self.current_path.clone());
         self.history_forward.clear();
         self.current_path = path;
@@ -112,6 +139,10 @@ impl PaneState {
     }
 
     pub fn go_back(&mut self) -> Option<RavenPath> {
+        // Recent is not a history entry: back from it is the folder behind it.
+        if let Some(folder) = self.leave_recent() {
+            return Some(folder);
+        }
         if let Some(prev) = self.history_back.pop() {
             self.history_forward.push(self.current_path.clone());
             self.current_path = prev.clone();
@@ -125,6 +156,7 @@ impl PaneState {
 
     pub fn go_forward(&mut self) -> Option<RavenPath> {
         if let Some(next) = self.history_forward.pop() {
+            self.recent = false;
             self.history_back.push(self.current_path.clone());
             self.current_path = next.clone();
             self.selection.clear();
@@ -453,6 +485,34 @@ mod tests {
             tab.pane_on(PaneSide::Right).unwrap().current_path,
             RavenPath::local("/tmp")
         );
+    }
+
+    #[test]
+    fn recent_view_keeps_the_folder_and_leaves_by_navigation() {
+        let mut pane = PaneState::new(0, RavenPath::local("/home"));
+        pane.navigate_to(RavenPath::local("/home/docs"));
+        pane.filter = FilterSpec::with_query("x");
+
+        pane.show_recent(vec![FileEntry::new(
+            "a.txt".into(),
+            RavenPath::local("/tmp/a.txt"),
+            raven_core::entry::EntryKind::File,
+            Default::default(),
+        )]);
+        assert!(pane.recent);
+        assert!(pane.filter.is_empty());
+        assert_eq!(pane.current_path, RavenPath::local("/home/docs"));
+
+        // Back leaves Recent for the folder behind it without using history.
+        assert_eq!(pane.go_back(), Some(RavenPath::local("/home/docs")));
+        assert!(!pane.recent);
+        assert_eq!(pane.history_back, vec![RavenPath::local("/home")]);
+        assert_eq!(pane.leave_recent(), None);
+
+        // Navigating anywhere also ends the recent view.
+        pane.show_recent(Vec::new());
+        pane.navigate_to(RavenPath::local("/etc"));
+        assert!(!pane.recent);
     }
 
     #[test]

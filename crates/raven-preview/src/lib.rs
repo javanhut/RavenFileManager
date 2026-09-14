@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod directory;
 pub mod image_preview;
+pub mod pdf;
 pub mod router;
 pub mod text;
 pub mod thumbnail;

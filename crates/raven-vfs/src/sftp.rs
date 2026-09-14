@@ -303,6 +303,96 @@ impl SftpFs {
     }
 
     /// Build an SFTP-flavored RavenPath for a child entry.
+    /// Open `path` with `flags` and write `contents` to it.
+    async fn write_with_flags(
+        &self,
+        path: &RavenPath,
+        contents: &[u8],
+        flags: OpenFlags,
+    ) -> RavenResult<()> {
+        let remote_path = Self::extract_remote_path(path)?;
+        let guard = self.get_sftp().await?;
+        let inner = guard.as_ref().unwrap();
+
+        let mut file = match inner.sftp.open_with_flags(remote_path, flags).await {
+            Ok(file) => file,
+            Err(e) => {
+                // Servers report an exclusive create onto a taken name as a
+                // generic failure, so look before calling it a network error.
+                if flags.contains(OpenFlags::EXCLUDE)
+                    && inner.sftp.try_exists(remote_path).await.unwrap_or(false)
+                {
+                    return Err(RavenError::AlreadyExists {
+                        path: std::path::PathBuf::from(path.to_string()),
+                    });
+                }
+                return Err(RavenError::Network {
+                    message: format!("SFTP open for write failed for {}: {}", remote_path, e),
+                });
+            }
+        };
+
+        use tokio::io::AsyncWriteExt;
+        let written = async {
+            file.write_all(contents).await?;
+            file.shutdown().await
+        }
+        .await;
+        if let Err(e) = written {
+            if flags.contains(OpenFlags::EXCLUDE) {
+                // Only a file this call created is removed.
+                let _ = inner.sftp.remove_file(remote_path).await;
+            }
+            return Err(RavenError::Network {
+                message: format!("SFTP write failed for {}: {}", remote_path, e),
+            });
+        }
+        Ok(())
+    }
+
+    /// Remove `path` and, for a folder, everything in it. Links are
+    /// inspected with lstat, so a link is removed rather than followed.
+    fn delete_tree<'a>(
+        sftp: &'a SftpSession,
+        path: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RavenResult<()>> + Send + 'a>> {
+        Box::pin(async move {
+            let attrs = sftp
+                .symlink_metadata(path.as_str())
+                .await
+                .map_err(|e| RavenError::Network {
+                    message: format!("SFTP stat failed for {}: {}", path, e),
+                })?;
+            if attrs.file_type().is_dir() {
+                let children = sftp
+                    .read_dir(path.as_str())
+                    .await
+                    .map_err(|e| RavenError::Network {
+                        message: format!("SFTP read_dir failed for {}: {}", path, e),
+                    })?;
+                for child in children {
+                    let name = child.file_name();
+                    if name == "." || name == ".." {
+                        continue;
+                    }
+                    let child_path = format!("{}/{}", path.trim_end_matches('/'), name);
+                    Self::delete_tree(sftp, child_path).await?;
+                }
+                sftp.remove_dir(path.as_str())
+                    .await
+                    .map_err(|e| RavenError::Network {
+                        message: format!("SFTP rmdir failed for {}: {}", path, e),
+                    })
+            } else {
+                sftp.remove_file(path.as_str())
+                    .await
+                    .map_err(|e| RavenError::Network {
+                        message: format!("SFTP remove failed for {}: {}", path, e),
+                    })
+            }
+        })
+    }
+
     fn child_path(&self, parent_remote: &str, child_name: &str) -> RavenPath {
         let parent_trimmed = parent_remote.trim_end_matches('/');
         RavenPath::Sftp {
@@ -388,30 +478,22 @@ impl VirtualFileSystem for SftpFs {
     }
 
     async fn write(&self, path: &RavenPath, contents: &[u8]) -> RavenResult<()> {
-        let remote_path = Self::extract_remote_path(path)?;
-        let guard = self.get_sftp().await?;
-        let inner = guard.as_ref().unwrap();
+        self.write_with_flags(
+            path,
+            contents,
+            OpenFlags::CREATE | OpenFlags::WRITE | OpenFlags::TRUNCATE,
+        )
+        .await
+    }
 
-        let mut file = inner
-            .sftp
-            .open_with_flags(
-                remote_path,
-                OpenFlags::CREATE | OpenFlags::WRITE | OpenFlags::TRUNCATE,
-            )
-            .await
-            .map_err(|e| RavenError::Network {
-                message: format!("SFTP open for write failed for {}: {}", remote_path, e),
-            })?;
-
-        use tokio::io::AsyncWriteExt;
-        file.write_all(contents).await.map_err(|e| RavenError::Network {
-            message: format!("SFTP write failed for {}: {}", remote_path, e),
-        })?;
-        file.shutdown().await.map_err(|e| RavenError::Network {
-            message: format!("SFTP close after write failed for {}: {}", remote_path, e),
-        })?;
-
-        Ok(())
+    /// Created with EXCLUDE, so the server refuses when the name is taken.
+    async fn write_new(&self, path: &RavenPath, contents: &[u8]) -> RavenResult<()> {
+        self.write_with_flags(
+            path,
+            contents,
+            OpenFlags::CREATE | OpenFlags::WRITE | OpenFlags::EXCLUDE,
+        )
+        .await
     }
 
     async fn copy(
@@ -454,41 +536,14 @@ impl VirtualFileSystem for SftpFs {
         Ok(())
     }
 
+    /// Deletes folders with everything in them, like the other backends
+    /// (SFTP itself only removes empty folders). A symlink is removed as a
+    /// link; what it points to is never touched.
     async fn delete(&self, path: &RavenPath) -> RavenResult<()> {
         let remote_path = Self::extract_remote_path(path)?;
         let guard = self.get_sftp().await?;
         let inner = guard.as_ref().unwrap();
-
-        // Try stat first to determine if it's a file or directory.
-        let attrs = inner
-            .sftp
-            .metadata(remote_path)
-            .await
-            .map_err(|e| RavenError::Network {
-                message: format!("SFTP stat failed for {}: {}", remote_path, e),
-            })?;
-
-        let is_dir = attrs.file_type().is_dir();
-
-        if is_dir {
-            inner
-                .sftp
-                .remove_dir(remote_path)
-                .await
-                .map_err(|e| RavenError::Network {
-                    message: format!("SFTP rmdir failed for {}: {}", remote_path, e),
-                })?;
-        } else {
-            inner
-                .sftp
-                .remove_file(remote_path)
-                .await
-                .map_err(|e| RavenError::Network {
-                    message: format!("SFTP remove failed for {}: {}", remote_path, e),
-                })?;
-        }
-
-        Ok(())
+        Self::delete_tree(&inner.sftp, remote_path.to_string()).await
     }
 
     async fn create_dir(&self, path: &RavenPath) -> RavenResult<()> {
@@ -496,15 +551,17 @@ impl VirtualFileSystem for SftpFs {
         let guard = self.get_sftp().await?;
         let inner = guard.as_ref().unwrap();
 
-        inner
-            .sftp
-            .create_dir(remote_path)
-            .await
-            .map_err(|e| RavenError::Network {
-                message: format!("SFTP mkdir failed for {}: {}", remote_path, e),
-            })?;
-
-        Ok(())
+        match inner.sftp.create_dir(remote_path).await {
+            Ok(()) => Ok(()),
+            // A folder that is already there is fine, as on the other
+            // backends, so copying a folder onto an existing one merges.
+            Err(e) => match inner.sftp.metadata(remote_path).await {
+                Ok(attrs) if attrs.file_type().is_dir() => Ok(()),
+                _ => Err(RavenError::Network {
+                    message: format!("SFTP mkdir failed for {}: {}", remote_path, e),
+                }),
+            },
+        }
     }
 
     async fn exists(&self, path: &RavenPath) -> RavenResult<bool> {
@@ -512,16 +569,16 @@ impl VirtualFileSystem for SftpFs {
         let guard = self.get_sftp().await?;
         let inner = guard.as_ref().unwrap();
 
-        match inner.sftp.try_exists(remote_path).await {
-            Ok(exists) => Ok(exists),
-            Err(e) => {
-                warn!(
-                    "SFTP exists check for {} returned unexpected error: {}",
-                    remote_path, e
-                );
-                Ok(false)
-            }
-        }
+        // Only a missing path is `false`. Any other failure is an error:
+        // conflict detection relies on this, and an unreachable file taken
+        // for a free name would be written over.
+        inner
+            .sftp
+            .try_exists(remote_path)
+            .await
+            .map_err(|e| RavenError::Network {
+                message: format!("SFTP exists check failed for {}: {}", remote_path, e),
+            })
     }
 
     fn supports(&self, path: &RavenPath) -> bool {

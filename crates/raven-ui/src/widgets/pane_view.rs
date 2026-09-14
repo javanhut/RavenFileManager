@@ -1,15 +1,22 @@
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use gtk4 as gtk;
+use gtk::glib;
 use gtk::prelude::*;
 
 use raven_core::commands::AppCommand;
 use raven_core::config::ViewMode;
+use raven_core::path::RavenPath;
 
 use crate::state::{AppState, PaneResolver, PaneSide};
 use crate::widgets::context_menu::FileContextMenu;
 use crate::widgets::file_list::FileListView;
 use crate::widgets::path_bar::PathBar;
+
+/// What a quick filter was typed against: a pane, its folder, and whether it
+/// was showing Recent. Showing anything else ends the filter.
+type FilterScope = (u32, RavenPath, bool);
 
 /// One pane: a path bar over a file listing, plus its context menu.
 pub struct PaneView {
@@ -18,6 +25,10 @@ pub struct PaneView {
     pub file_list: Rc<FileListView>,
     pub path_bar: Rc<PathBar>,
     pub context_menu: Rc<FileContextMenu>,
+    /// Quick filter: opened by typing into the listing, narrows it by name.
+    filter_bar: gtk::Box,
+    filter_entry: gtk::SearchEntry,
+    filter_scope: Rc<RefCell<Option<FilterScope>>>,
 }
 
 impl PaneView {
@@ -37,22 +48,170 @@ impl PaneView {
         };
 
         let path_bar = Rc::new(PathBar::new(command_tx.clone(), resolver.clone()));
-        path_bar.container.set_margin_start(8);
-        path_bar.container.set_margin_end(8);
-        path_bar.container.set_margin_top(4);
-        path_bar.container.set_margin_bottom(4);
+        path_bar.container.set_margin_start(10);
+        path_bar.container.set_margin_end(10);
+        path_bar.container.set_margin_top(8);
+        path_bar.container.set_margin_bottom(6);
 
-        let file_list = Rc::new(FileListView::new(state, command_tx, resolver));
+        let file_list = Rc::new(FileListView::new(
+            state.clone(),
+            command_tx,
+            resolver.clone(),
+        ));
+
+        // --- Quick filter bar, hidden until typed into ---
+        let filter_entry = gtk::SearchEntry::new();
+        filter_entry.set_hexpand(true);
+        filter_entry.set_placeholder_text(Some("Filter this folder"));
+        let filter_bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        filter_bar.add_css_class("quick-filter");
+        filter_bar.set_margin_start(10);
+        filter_bar.set_margin_end(10);
+        filter_bar.set_margin_bottom(6);
+        filter_bar.append(&filter_entry);
+        filter_bar.set_visible(false);
+        let filter_scope: Rc<RefCell<Option<FilterScope>>> = Rc::new(RefCell::new(None));
+
+        let no_matches = gtk::Label::new(Some("No matches"));
+        no_matches.add_css_class("no-matches");
+        no_matches.set_halign(gtk::Align::Center);
+        no_matches.set_valign(gtk::Align::Center);
+        no_matches.set_can_target(false);
+        no_matches.set_visible(false);
+
+        let overlay = gtk::Overlay::new();
+        overlay.set_hexpand(true);
+        overlay.set_vexpand(true);
+        overlay.set_child(Some(&file_list.widget));
+        overlay.add_overlay(&no_matches);
 
         let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
         container.add_css_class("pane-box");
         container.set_hexpand(true);
         container.set_vexpand(true);
         container.append(&path_bar.container);
-        container.append(&file_list.widget);
+        container.append(&filter_bar);
+        container.append(&overlay);
 
         let context_menu = Rc::new(FileContextMenu::new());
         context_menu.popover.set_parent(&file_list.widget);
+
+        // "No matches" follows the filtered list, which also changes when the
+        // folder reloads under an active filter.
+        {
+            let list = file_list.clone();
+            let label = no_matches.clone();
+            file_list.filtered.connect_items_changed(move |model, _, _, _| {
+                label.set_visible(list.is_quick_filtered() && model.n_items() == 0);
+            });
+        }
+
+        {
+            let list = file_list.clone();
+            let bar = filter_bar.clone();
+            let label = no_matches.clone();
+            filter_entry.connect_changed(move |entry| {
+                let text = entry.text();
+                list.set_quick_filter(&text);
+                label.set_visible(!text.is_empty() && list.filtered.n_items() == 0);
+                // Deleting the last character closes the bar, so Space and the
+                // other plain-key shortcuts reach the listing again.
+                if text.is_empty() && bar.is_visible() {
+                    bar.set_visible(false);
+                    list.focus_view();
+                }
+            });
+        }
+        {
+            let list = file_list.clone();
+            let bar = filter_bar.clone();
+            filter_entry.connect_stop_search(move |entry| {
+                close_filter(&bar, entry);
+                list.focus_view();
+            });
+        }
+        // Enter, or Down, hands the keyboard to the matches with the first one
+        // selected, so the next Enter opens it.
+        {
+            let list = file_list.clone();
+            filter_entry.connect_activate(move |_| focus_first_match(&list));
+        }
+        {
+            let list = file_list.clone();
+            let keys = gtk::EventControllerKey::new();
+            // Capture, so the entry's inner text widget cannot take Down first.
+            keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+            keys.connect_key_pressed(move |_, key, _, _| {
+                if key == gtk::gdk::Key::Down {
+                    focus_first_match(&list);
+                    return glib::Propagation::Stop;
+                }
+                glib::Propagation::Proceed
+            });
+            filter_entry.add_controller(keys);
+        }
+
+        // Typing a character into the listing starts (or extends) the filter.
+        // Capture phase, so the list widgets never see the keys it takes; keys
+        // bound to a shortcut, like Space for the preview, are left alone.
+        {
+            let bar = filter_bar.clone();
+            let entry = filter_entry.clone();
+            let scope = filter_scope.clone();
+            let state = state.clone();
+            let keys = gtk::EventControllerKey::new();
+            keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+            keys.connect_key_pressed(move |_, key, _, modifiers| {
+                use gtk::gdk::ModifierType;
+                // Escape ends the filter from the listing too, after Enter or
+                // Down has handed it the keyboard.
+                if key == gtk::gdk::Key::Escape && bar.is_visible() {
+                    close_filter(&bar, &entry);
+                    scope.borrow_mut().take();
+                    return glib::Propagation::Stop;
+                }
+                if modifiers
+                    .intersects(ModifierType::CONTROL_MASK | ModifierType::ALT_MASK | ModifierType::SUPER_MASK)
+                {
+                    return glib::Propagation::Proceed;
+                }
+                let Some(ch) = key.to_unicode().filter(|c| starts_filter(*c)) else {
+                    return glib::Propagation::Proceed;
+                };
+                let held: &[&str] = if modifiers.contains(ModifierType::SHIFT_MASK) {
+                    &["Shift"]
+                } else {
+                    &[]
+                };
+                let bound = key.name().is_some_and(|name| {
+                    state
+                        .borrow()
+                        .config
+                        .keybindings
+                        .action_for(&name, held)
+                        .is_some()
+                });
+                if bound {
+                    return glib::Propagation::Proceed;
+                }
+
+                if !bar.is_visible() {
+                    let pane_id = resolver();
+                    *scope.borrow_mut() = state
+                        .borrow()
+                        .pane_by_id(pane_id)
+                        .map(|p| (pane_id, p.current_path.clone(), p.recent));
+                    bar.set_visible(true);
+                }
+                let mut text = entry.text().to_string();
+                text.push(ch);
+                entry.set_text(&text);
+                entry.grab_focus();
+                entry.set_position(-1);
+                glib::Propagation::Stop
+            });
+            file_list.widget.add_controller(keys);
+        }
 
         Self {
             side,
@@ -60,7 +219,16 @@ impl PaneView {
             file_list,
             path_bar,
             context_menu,
+            filter_bar,
+            filter_entry,
+            filter_scope,
         }
+    }
+
+    /// Drop the quick filter without moving the keyboard.
+    pub fn clear_quick_filter(&self) {
+        close_filter(&self.filter_bar, &self.filter_entry);
+        self.filter_scope.borrow_mut().take();
     }
 
     /// The three list widgets, for attaching gestures and action groups.
@@ -73,6 +241,29 @@ impl PaneView {
     }
 }
 
+/// Whether typing `ch` into a listing starts a quick filter: printable
+/// characters, but not whitespace, which no file name search starts with.
+pub fn starts_filter(ch: char) -> bool {
+    !ch.is_control() && !ch.is_whitespace()
+}
+
+/// Hide the filter bar and empty it. The bar goes first, so the entry's
+/// change handler sees a closed bar and leaves the keyboard where it is.
+fn close_filter(bar: &gtk::Box, entry: &gtk::SearchEntry) {
+    bar.set_visible(false);
+    if !entry.text().is_empty() {
+        entry.set_text("");
+    }
+}
+
+/// Select the first row the filter left and give the listing the keyboard.
+fn focus_first_match(list: &FileListView) {
+    if list.selection.n_items() > 0 {
+        list.selection.select_item(0, true);
+    }
+    list.focus_view();
+}
+
 /// The two panes side by side, and the bookkeeping of which one is active.
 pub struct PaneViews {
     pub left: PaneView,
@@ -80,6 +271,8 @@ pub struct PaneViews {
     pub paned: gtk::Paned,
     state: AppState,
     command_tx: tokio::sync::mpsc::UnboundedSender<AppCommand>,
+    /// Bumped by every Recent load, so a slower earlier one cannot land last.
+    recent_generation: std::cell::Cell<u64>,
 }
 
 impl PaneViews {
@@ -107,6 +300,7 @@ impl PaneViews {
             paned,
             state,
             command_tx,
+            recent_generation: std::cell::Cell::new(0),
         });
 
         // Focus landing anywhere in a pane makes it the active one.
@@ -225,7 +419,7 @@ impl PaneViews {
         let Some(view) = self.view_for_pane(pane_id) else {
             return;
         };
-        let (visible, show_hidden, vcs, path) = {
+        let (visible, show_hidden, vcs, path, recent) = {
             let s = self.state.borrow();
             let Some(pane) = s.pane_by_id(pane_id) else {
                 return;
@@ -235,10 +429,98 @@ impl PaneViews {
                 s.show_hidden,
                 pane.vcs_statuses.clone(),
                 pane.current_path.clone(),
+                pane.recent,
             )
         };
+        self.sync_quick_filter(pane_id);
         view.file_list.set_entries(&visible, show_hidden, &vcs);
-        view.path_bar.set_path(&path, &self.command_tx, pane_id);
+        if recent {
+            view.path_bar.set_label(RECENT_ICON, "Recent");
+        } else {
+            view.path_bar.set_path(&path, &self.command_tx, pane_id);
+        }
+    }
+
+    /// End the quick filter of the view showing `pane_id` if that view now
+    /// shows something other than what the filter was typed against: another
+    /// folder, another tab's pane, or Recent. A reload of the same folder
+    /// keeps it.
+    pub fn sync_quick_filter(&self, pane_id: u32) {
+        let Some(view) = self.view_for_pane(pane_id) else {
+            return;
+        };
+        let current: Option<FilterScope> = self
+            .state
+            .borrow()
+            .pane_by_id(pane_id)
+            .map(|p| (pane_id, p.current_path.clone(), p.recent));
+        let stale = view
+            .filter_scope
+            .borrow()
+            .as_ref()
+            .is_some_and(|scope| Some(scope) != current.as_ref());
+        if stale {
+            view.clear_quick_filter();
+        }
+    }
+
+    /// List recently used files in `pane_id`, in place of its folder.
+    ///
+    /// The pane switches to Recent at once; the files are checked for
+    /// existence on a worker thread (a stalled mount would otherwise freeze
+    /// the window) and the listing fills in when that is done, after which
+    /// `on_loaded` gets the count. A reload keeps the old list meanwhile.
+    pub fn show_recent(self: &Rc<Self>, pane_id: u32, on_loaded: impl FnOnce(usize) + 'static) {
+        let switching = {
+            let mut s = self.state.borrow_mut();
+            for tab in s.tabs.iter_mut() {
+                let owns = tab.pane.id == pane_id
+                    || tab.secondary_pane.as_ref().is_some_and(|p| p.id == pane_id);
+                if owns {
+                    tab.title = "Recent".to_string();
+                }
+            }
+            match s.pane_by_id_mut(pane_id) {
+                Some(pane) if !pane.recent => {
+                    pane.show_recent(Vec::new());
+                    true
+                }
+                Some(_) => false,
+                None => return,
+            }
+        };
+        if switching {
+            self.render(pane_id);
+        }
+
+        let generation = self.recent_generation.get() + 1;
+        self.recent_generation.set(generation);
+        let candidates = crate::recent::recent_candidates();
+        let views = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let Ok(entries) =
+                gio::spawn_blocking(move || crate::recent::recent_entries(candidates)).await
+            else {
+                return;
+            };
+            let Some(views) = views.upgrade() else {
+                return;
+            };
+            if views.recent_generation.get() != generation {
+                return;
+            }
+            let count = entries.len();
+            {
+                let mut s = views.state.borrow_mut();
+                // Left Recent while the files were being checked.
+                match s.pane_by_id_mut(pane_id) {
+                    Some(pane) if pane.recent => pane.entries = entries,
+                    _ => return,
+                }
+            }
+            views.render(pane_id);
+            on_loaded(count);
+        });
     }
 
     /// Every pane the active tab shows.
@@ -259,22 +541,32 @@ impl PaneViews {
     }
 
     /// Reload every shown pane's directory from the backend.
-    pub fn reload_all(&self) {
-        let targets: Vec<(u32, _)> = {
-            let s = self.state.borrow();
-            self.visible_pane_ids()
-                .into_iter()
-                .filter_map(|id| s.pane_by_id(id).map(|p| (id, p.current_path.clone())))
-                .collect()
-        };
-        for (pane_id, path) in targets {
-            let _ = self.command_tx.send(AppCommand::Navigate { path, pane_id });
+    pub fn reload_all(self: &Rc<Self>) {
+        for pane_id in self.visible_pane_ids() {
+            self.reload(pane_id);
+        }
+    }
+
+    /// Reload one pane: its directory from the backend, or, while it shows
+    /// Recent, the recent list -- a reload is not a request to leave it.
+    pub fn reload(self: &Rc<Self>, pane_id: u32) {
+        let target = self
+            .state
+            .borrow()
+            .pane_by_id(pane_id)
+            .map(|p| (p.recent, p.current_path.clone()));
+        match target {
+            Some((true, _)) => self.show_recent(pane_id, |_| {}),
+            Some((false, path)) => {
+                let _ = self.command_tx.send(AppCommand::Navigate { path, pane_id });
+            }
+            None => {}
         }
     }
 
     /// Bring the panes in line with the active tab: layout, listings, and a
     /// fresh load of each shown directory.
-    pub fn show_active_tab(&self) {
+    pub fn show_active_tab(self: &Rc<Self>) {
         self.sync_layout();
         self.render_all();
         self.reload_all();
@@ -320,5 +612,25 @@ impl PaneViews {
     pub fn set_view_mode(&self, mode: ViewMode) {
         self.left.file_list.set_view_mode(mode);
         self.right.file_list.set_view_mode(mode);
+    }
+}
+
+/// The icon Recent is shown with, in the sidebar and the path bar.
+pub const RECENT_ICON: &str = "document-open-recent-symbolic";
+
+#[cfg(test)]
+mod tests {
+    use super::starts_filter;
+
+    #[test]
+    fn printable_characters_start_a_filter() {
+        assert!(starts_filter('a'));
+        assert!(starts_filter('Ä'));
+        assert!(starts_filter('.'));
+        assert!(starts_filter('7'));
+        assert!(!starts_filter(' '));
+        assert!(!starts_filter('\t'));
+        assert!(!starts_filter('\u{8}'));
+        assert!(!starts_filter('\u{7f}'));
     }
 }

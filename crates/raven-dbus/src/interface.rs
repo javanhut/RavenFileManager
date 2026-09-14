@@ -33,7 +33,11 @@ pub enum DbusResult {
     Success,
     Path(String),
     Paths(Vec<String>),
+    /// The request itself was invalid (e.g. a relative path).
     Error(String),
+    /// The request was valid but could not be carried out, e.g. the command
+    /// loop has already shut down.
+    Failed(String),
 }
 
 /// Convert a DBus method call to an AppCommand.
@@ -81,6 +85,42 @@ pub fn method_to_command(method: &DbusMethod) -> Option<AppCommand> {
             })
         }
         DbusMethod::GetCurrentPath | DbusMethod::GetSelection => None,
+    }
+}
+
+/// Reject a call whose paths are not absolute.
+///
+/// A D-Bus caller has no working directory the file manager shares, so a
+/// relative path would be resolved against wherever this process happened to
+/// start -- a copy or a delete landing somewhere nobody meant. Refusing it
+/// gives the caller an error it can see instead.
+pub fn validate_method(method: &DbusMethod) -> Result<(), String> {
+    let check = |p: &String| {
+        if p.is_empty() || !std::path::Path::new(p).is_absolute() {
+            Err(format!("not an absolute path: {:?}", p))
+        } else {
+            Ok(())
+        }
+    };
+    match method {
+        DbusMethod::Navigate { path } => check(path),
+        DbusMethod::CopyFiles { sources, dest } | DbusMethod::MoveFiles { sources, dest } => {
+            if sources.is_empty() {
+                return Err("no source files given".to_string());
+            }
+            sources.iter().try_for_each(check)?;
+            check(dest)
+        }
+        DbusMethod::DeleteFiles { paths } | DbusMethod::TrashFiles { paths } => {
+            if paths.is_empty() {
+                return Err("no files given".to_string());
+            }
+            paths.iter().try_for_each(check)
+        }
+        DbusMethod::Search { path, .. } => check(path),
+        DbusMethod::TriggerAutomationRule { .. }
+        | DbusMethod::GetCurrentPath
+        | DbusMethod::GetSelection => Ok(()),
     }
 }
 
@@ -244,6 +284,41 @@ mod tests {
     fn method_to_command_returns_none_for_get_selection() {
         let method = DbusMethod::GetSelection;
         assert!(method_to_command(&method).is_none());
+    }
+
+    #[test]
+    fn validate_accepts_absolute_paths_and_queries() {
+        assert!(validate_method(&DbusMethod::Navigate { path: "/tmp".into() }).is_ok());
+        assert!(validate_method(&DbusMethod::CopyFiles {
+            sources: vec!["/a".into(), "/b".into()],
+            dest: "/c".into(),
+        })
+        .is_ok());
+        assert!(validate_method(&DbusMethod::GetSelection).is_ok());
+        assert!(validate_method(&DbusMethod::GetCurrentPath).is_ok());
+        assert!(validate_method(&DbusMethod::TriggerAutomationRule { rule_id: "r".into() }).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_relative_empty_or_missing_paths() {
+        assert!(validate_method(&DbusMethod::Navigate { path: "docs".into() }).is_err());
+        assert!(validate_method(&DbusMethod::Navigate { path: "".into() }).is_err());
+        assert!(validate_method(&DbusMethod::MoveFiles {
+            sources: vec!["/a".into()],
+            dest: "rel".into(),
+        })
+        .is_err());
+        assert!(validate_method(&DbusMethod::CopyFiles {
+            sources: vec!["/a".into(), "b".into()],
+            dest: "/c".into(),
+        })
+        .is_err());
+        assert!(validate_method(&DbusMethod::TrashFiles { paths: vec![] }).is_err());
+        assert!(validate_method(&DbusMethod::Search {
+            query: "x".into(),
+            path: "./here".into(),
+        })
+        .is_err());
     }
 
     #[test]

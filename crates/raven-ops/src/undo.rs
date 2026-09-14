@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use raven_core::error::{RavenError, RavenResult};
 use raven_core::operations::{OperationId, OperationKind};
@@ -27,6 +27,11 @@ pub struct UndoRecord {
     pub destination: Option<RavenPath>,
     /// For trash operations, the trash entries that were created.
     pub trash_entries: Vec<TrashEntryRecord>,
+    /// The exact `(original, created)` pairs the operation produced, when
+    /// known. Undo touches only these, so an item that was skipped, renamed
+    /// to keep both, or written over existing data is handled correctly.
+    /// `None` means each source's name inside `destination`.
+    pub items: Option<Vec<(RavenPath, RavenPath)>>,
     /// Whether this operation can be undone.
     pub undoable: bool,
 }
@@ -96,15 +101,20 @@ impl UndoStack {
         sources: Vec<RavenPath>,
         destination: RavenPath,
     ) {
-        self.push(UndoRecord {
-            operation_id,
-            kind: OperationKind::Copy,
-            sources,
-            destination: Some(destination),
-            trash_entries: Vec::new(),
-            undoable: true,
-        })
-        .await;
+        self.push_transfer(OperationKind::Copy, operation_id, sources, destination, None)
+            .await;
+    }
+
+    /// Record a completed copy with the exact items it created.
+    pub async fn record_copy_items(
+        &self,
+        operation_id: OperationId,
+        sources: Vec<RavenPath>,
+        destination: RavenPath,
+        items: Vec<(RavenPath, RavenPath)>,
+    ) {
+        self.push_transfer(OperationKind::Copy, operation_id, sources, destination, Some(items))
+            .await;
     }
 
     /// Record a completed move operation.
@@ -114,12 +124,43 @@ impl UndoStack {
         sources: Vec<RavenPath>,
         destination: RavenPath,
     ) {
+        self.push_transfer(OperationKind::Move, operation_id, sources, destination, None)
+            .await;
+    }
+
+    /// Record a completed move with the exact `(original, moved)` pairs.
+    pub async fn record_move_items(
+        &self,
+        operation_id: OperationId,
+        sources: Vec<RavenPath>,
+        destination: RavenPath,
+        items: Vec<(RavenPath, RavenPath)>,
+    ) {
+        self.push_transfer(OperationKind::Move, operation_id, sources, destination, Some(items))
+            .await;
+    }
+
+    async fn push_transfer(
+        &self,
+        kind: OperationKind,
+        operation_id: OperationId,
+        sources: Vec<RavenPath>,
+        destination: RavenPath,
+        items: Option<Vec<(RavenPath, RavenPath)>>,
+    ) {
+        // Nothing reversible happened (everything was skipped, replaced or
+        // merged): a record would only use up an Undo doing nothing.
+        if items.as_ref().is_some_and(|items| items.is_empty()) {
+            debug!(id = ?operation_id, "nothing to record for undo");
+            return;
+        }
         self.push(UndoRecord {
             operation_id,
-            kind: OperationKind::Move,
+            kind,
             sources,
             destination: Some(destination),
             trash_entries: Vec::new(),
+            items,
             undoable: true,
         })
         .await;
@@ -137,6 +178,7 @@ impl UndoStack {
             sources,
             destination: None,
             trash_entries: Vec::new(),
+            items: None,
             undoable: false,
         })
         .await;
@@ -155,6 +197,7 @@ impl UndoStack {
             sources,
             destination: None,
             trash_entries,
+            items: None,
             undoable: true,
         })
         .await;
@@ -174,6 +217,32 @@ impl UndoStack {
             count = records.len(),
             "undo record pushed"
         );
+    }
+
+    /// Stop offering undo for every earlier copy or move whose result is
+    /// `path`, lies inside it, or contains it.
+    ///
+    /// Called before something is written over or merged into `path`: from
+    /// then on those results hold data that operation did not create, so
+    /// undoing it (deleting a copy, moving an item back) would take that
+    /// data along.
+    pub async fn invalidate_touching(&self, path: &RavenPath) {
+        let mut records = self.records.lock().await;
+        for record in records.iter_mut().filter(|r| r.undoable) {
+            if !matches!(record.kind, OperationKind::Copy | OperationKind::Move) {
+                continue;
+            }
+            let Ok(pairs) = Self::transfer_pairs(record) else {
+                continue;
+            };
+            let touched = pairs.iter().any(|(_, result)| {
+                result == path || result.is_inside(path) || path.is_inside(result)
+            });
+            if touched {
+                info!(id = ?record.operation_id, path = %path, "undo no longer offered: its result is being overwritten");
+                record.undoable = false;
+            }
+        }
     }
 
     /// Pop the most recent undoable record from the stack.
@@ -239,21 +308,33 @@ impl UndoStack {
         Ok(record)
     }
 
+    /// The `(original, result)` pairs a copy or move record stands for.
+    fn transfer_pairs(record: &UndoRecord) -> RavenResult<Vec<(RavenPath, RavenPath)>> {
+        if let Some(items) = &record.items {
+            return Ok(items.clone());
+        }
+        let destination = record.destination.as_ref().ok_or_else(|| RavenError::Other {
+            message: format!("{:?} undo record missing destination", record.kind),
+        })?;
+        record
+            .sources
+            .iter()
+            .map(|source| {
+                let file_name = source.file_name().ok_or_else(|| RavenError::Other {
+                    message: format!("unable to determine file name for {}", source),
+                })?;
+                Ok((source.clone(), destination.join(file_name)))
+            })
+            .collect()
+    }
+
     /// Undo a copy by deleting the copied files at the destination.
     async fn undo_copy(
         &self,
         vfs: &dyn VirtualFileSystem,
         record: &UndoRecord,
     ) -> RavenResult<()> {
-        let destination = record.destination.as_ref().ok_or_else(|| RavenError::Other {
-            message: "copy undo record missing destination".to_string(),
-        })?;
-
-        for source in &record.sources {
-            let file_name = source.file_name().ok_or_else(|| RavenError::Other {
-                message: format!("unable to determine file name for {}", source),
-            })?;
-            let copied_path = destination.join(file_name);
+        for (_, copied_path) in Self::transfer_pairs(record)? {
             if vfs.exists(&copied_path).await? {
                 vfs.delete(&copied_path).await?;
                 debug!(path = %copied_path, "deleted copied file for undo");
@@ -264,20 +345,29 @@ impl UndoStack {
     }
 
     /// Undo a move by moving files back from destination to their original locations.
+    ///
+    /// Something that has since appeared at an original location is never
+    /// written over; those items stay where they are and an error says so.
     async fn undo_move(
         &self,
         vfs: &dyn VirtualFileSystem,
         record: &UndoRecord,
     ) -> RavenResult<()> {
-        let destination = record.destination.as_ref().ok_or_else(|| RavenError::Other {
-            message: "move undo record missing destination".to_string(),
-        })?;
+        let mut blocked = None;
 
-        for source in &record.sources {
-            let file_name = source.file_name().ok_or_else(|| RavenError::Other {
-                message: format!("unable to determine file name for {}", source),
-            })?;
-            let moved_path = destination.join(file_name);
+        for (source, moved_path) in Self::transfer_pairs(record)? {
+            if !vfs.exists(&moved_path).await? {
+                continue;
+            }
+            // A case-only rename on a case-insensitive share sees its own
+            // item at the original name; that is not something in the way.
+            if vfs.exists(&source).await?
+                && !crate::conflict::same_object(vfs, &source, &moved_path).await?
+            {
+                warn!(from = %moved_path, to = %source, "not moving back over an existing item");
+                blocked.get_or_insert(source);
+                continue;
+            }
 
             // Ensure the original parent directory exists
             if let Some(parent) = source.parent() {
@@ -286,17 +376,23 @@ impl UndoStack {
                 }
             }
 
-            if vfs.exists(&moved_path).await? {
-                vfs.rename(&moved_path, source).await?;
-                debug!(
-                    from = %moved_path,
-                    to = %source,
-                    "moved file back for undo"
-                );
-            }
+            vfs.rename(&moved_path, &source).await?;
+            debug!(
+                from = %moved_path,
+                to = %source,
+                "moved file back for undo"
+            );
         }
 
-        Ok(())
+        match blocked {
+            None => Ok(()),
+            Some(path) => Err(RavenError::AlreadyExists {
+                path: path
+                    .as_local_path()
+                    .cloned()
+                    .unwrap_or_else(|| PathBuf::from(path.to_string())),
+            }),
+        }
     }
 
     /// Undo a trash operation by restoring files from the trash.
@@ -347,6 +443,7 @@ impl Default for UndoStack {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{remote, MemFs};
     use raven_core::operations::OperationId;
     use raven_core::path::RavenPath;
 
@@ -449,5 +546,87 @@ mod tests {
             .await;
         stack.clear().await;
         assert!(stack.is_empty().await);
+    }
+
+    fn trash() -> TrashFs {
+        let dir = std::env::temp_dir().join(format!("raven_undo_trash_{}", std::process::id()));
+        TrashFs::with_trash_dir(dir).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_undo_copy_items_deletes_only_what_was_created() {
+        let fs = MemFs::new();
+        let src = fs.file("/src/f.txt", b"new");
+        let original = fs.file("/dst/f.txt", b"old");
+        let kept_both = fs.file("/dst/f (1).txt", b"new");
+
+        let stack = UndoStack::new();
+        stack
+            .record_copy_items(
+                OperationId(1),
+                vec![src.clone()],
+                remote("/dst"),
+                vec![(src.clone(), kept_both.clone())],
+            )
+            .await;
+        stack.undo(&fs, &trash()).await.unwrap();
+
+        assert_eq!(fs.contents(&original).as_deref(), Some(&b"old"[..]));
+        assert!(fs.node(&kept_both).is_none());
+        assert!(fs.node(&src).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_empty_transfer_records_are_not_kept() {
+        let stack = UndoStack::new();
+        stack
+            .record_copy_items(OperationId(1), vec![remote("/a")], remote("/dst"), Vec::new())
+            .await;
+        stack
+            .record_move_items(OperationId(2), vec![remote("/b")], remote("/dst"), Vec::new())
+            .await;
+        assert!(stack.is_empty().await);
+    }
+
+    #[tokio::test]
+    async fn test_invalidate_touching_disables_overlapping_records_only() {
+        let stack = UndoStack::new();
+        let pair = |s: &str, d: &str| vec![(remote(s), remote(d))];
+        stack.record_copy_items(OperationId(1), vec![], remote("/dst"), pair("/x/d", "/dst/d")).await;
+        stack.record_copy_items(OperationId(2), vec![], remote("/dst"), pair("/x/e", "/dst/e")).await;
+        stack.record_move_items(OperationId(3), vec![], remote("/dst"), pair("/y/f.txt", "/dst/d/f.txt")).await;
+
+        stack.invalidate_touching(&remote("/dst/d")).await;
+
+        let undoable: Vec<_> = stack
+            .list()
+            .await
+            .into_iter()
+            .filter(|r| r.undoable)
+            .map(|r| r.operation_id)
+            .collect();
+        assert_eq!(undoable, vec![OperationId(2)]);
+    }
+
+    #[tokio::test]
+    async fn test_undo_move_never_overwrites_original_location() {
+        let fs = MemFs::new();
+        let moved = fs.file("/dst/f.txt", b"moved");
+        let original = fs.file("/src/f.txt", b"someone else's");
+
+        let stack = UndoStack::new();
+        stack
+            .record_move_items(
+                OperationId(1),
+                vec![original.clone()],
+                remote("/dst"),
+                vec![(original.clone(), moved.clone())],
+            )
+            .await;
+        let result = stack.undo(&fs, &trash()).await;
+
+        assert!(matches!(result, Err(RavenError::AlreadyExists { .. })));
+        assert_eq!(fs.contents(&original).as_deref(), Some(&b"someone else's"[..]));
+        assert_eq!(fs.contents(&moved).as_deref(), Some(&b"moved"[..]));
     }
 }

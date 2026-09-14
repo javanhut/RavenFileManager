@@ -1,3 +1,4 @@
+pub mod app_chooser_dialog;
 pub mod conflict_dialog;
 pub mod connect_dialog;
 pub mod container_banner;

@@ -27,6 +27,39 @@ pub trait VirtualFileSystem: Send + Sync {
         progress: Option<Box<dyn Fn(u64, u64) + Send + Sync>>,
     ) -> RavenResult<()>;
 
+    /// Write bytes to a file that must not exist yet. Fails with
+    /// `AlreadyExists` instead of replacing one.
+    ///
+    /// The default checks first and then writes, which leaves a gap;
+    /// backends that can create exclusively in one step override it.
+    async fn write_new(&self, path: &RavenPath, contents: &[u8]) -> RavenResult<()> {
+        if self.exists(path).await? {
+            return Err(crate::error::RavenError::AlreadyExists {
+                path: std::path::PathBuf::from(path.to_string()),
+            });
+        }
+        self.write(path, contents).await
+    }
+
+    /// Copy a file or directory without replacing any existing file: every
+    /// file is created exclusively, so one that appears at the destination
+    /// while the copy runs makes it fail with `AlreadyExists` instead.
+    ///
+    /// The default checks the destination first and then copies.
+    async fn copy_new(
+        &self,
+        source: &RavenPath,
+        destination: &RavenPath,
+        progress: Option<Box<dyn Fn(u64, u64) + Send + Sync>>,
+    ) -> RavenResult<()> {
+        if self.exists(destination).await? {
+            return Err(crate::error::RavenError::AlreadyExists {
+                path: std::path::PathBuf::from(destination.to_string()),
+            });
+        }
+        self.copy(source, destination, progress).await
+    }
+
     /// Move/rename a file or directory.
     async fn rename(&self, source: &RavenPath, destination: &RavenPath) -> RavenResult<()>;
 
