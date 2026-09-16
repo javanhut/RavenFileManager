@@ -97,14 +97,22 @@ fn default_launch_context() -> Option<gio::AppLaunchContext> {
     gtk::gdk::Display::default().map(|d| d.app_launch_context().upcast())
 }
 
+/// The shell command line for `command` applied to `file_path`: `%f` is
+/// replaced with the path, or the path is appended when the command has no
+/// placeholder. The path is quoted either way, so names with spaces or shell
+/// characters reach the application as one argument.
+fn command_line(command: &str, file_path: &Path) -> String {
+    let path = shell_escape(&file_path.to_string_lossy());
+    if command.contains("%f") {
+        command.replace("%f", &path)
+    } else {
+        format!("{} {}", command, path)
+    }
+}
+
 /// Spawn an application command, replacing `%f` with the file path.
 fn spawn_application(command: &str, file_path: &Path) -> Result<(), String> {
-    let path_str = file_path.to_string_lossy();
-    let full_cmd = if command.contains("%f") {
-        command.replace("%f", &path_str)
-    } else {
-        format!("{} {}", command, shell_escape(&path_str))
-    };
+    let full_cmd = command_line(command, file_path);
 
     tracing::info!("Opening with: {}", full_cmd);
     std::process::Command::new("sh")
@@ -485,6 +493,23 @@ mod tests {
         std::fs::write(&bare, "plain words\n").unwrap();
         assert_eq!(content_type_for_path(&bare), "text/plain");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn command_line_quotes_the_path() {
+        let spaced = Path::new("/home/a/Arc Design.png");
+        assert_eq!(
+            command_line("eagleeye %f", spaced),
+            "eagleeye '/home/a/Arc Design.png'"
+        );
+        assert_eq!(
+            command_line("eagleeye", spaced),
+            "eagleeye '/home/a/Arc Design.png'"
+        );
+        assert_eq!(
+            command_line("view %f --wait", Path::new("/x/it's.png")),
+            "view '/x/it'\\''s.png' --wait"
+        );
     }
 
     #[test]
