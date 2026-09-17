@@ -71,7 +71,7 @@ impl Sidebar {
                 gtk::glib::types::Type::INVALID,
                 gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE,
             );
-            // Other applications offer a file list; Raven's listings also a URI string.
+            // URI strings keep drops from older Raven and external sources working.
             pin_drop_target
                 .set_types(&[gtk::gdk::FileList::static_type(), gtk::glib::Type::STRING]);
 

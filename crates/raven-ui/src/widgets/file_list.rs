@@ -1148,10 +1148,11 @@ fn attach_item_drag(widget: &gtk::Box, selection: &gtk::MultiSelection) {
 /// The data a drag out of the list carries: the whole selection when the
 /// dragged item is part of it, otherwise just that item.
 ///
-/// Other applications (browsers, editors, chat clients) only accept files as
-/// a GdkFileList, which GTK offers as text/uri-list and through the portal's
-/// file transfer for sandboxed apps. Raven's own drop targets read a plain
-/// string of `file://` URI lines as a fallback, so that is offered alongside.
+/// Other applications (browsers, editors, chat clients) accept files as a
+/// GdkFileList, which GTK offers as text/uri-list and through the portal's
+/// file transfer for sandboxed apps. Do not offer the URI list as a `String`
+/// too: terminals may choose that text flavor and treat its CRLF separators
+/// as Enter, executing the dropped text instead of inserting a path.
 fn drag_content(selection: &gtk::MultiSelection, pos: u32) -> Option<gtk::gdk::ContentProvider> {
     if pos == u32::MAX {
         return None;
@@ -1173,17 +1174,14 @@ fn drag_content(selection: &gtk::MultiSelection, pos: u32) -> Option<gtk::gdk::C
         return None;
     }
 
+    Some(gtk::gdk::ContentProvider::for_value(
+        &file_drag_value(&paths),
+    ))
+}
+
+fn file_drag_value(paths: &[std::path::PathBuf]) -> glib::Value {
     let files: Vec<gtk::gio::File> = paths.iter().map(gtk::gio::File::for_path).collect();
-    // Escaped URIs (spaces as %20 and so on), which dnd::parse_uri_list and
-    // other apps' uri-list readers both decode.
-    let internal: String = files
-        .iter()
-        .map(|f| format!("{}\r\n", f.uri()))
-        .collect();
-    Some(gtk::gdk::ContentProvider::new_union(&[
-        gtk::gdk::ContentProvider::for_value(&gtk::gdk::FileList::from_array(&files).to_value()),
-        gtk::gdk::ContentProvider::for_value(&internal.to_value()),
-    ]))
+    gtk::gdk::FileList::from_array(&files).to_value()
 }
 
 /// The directory a drop onto a listing lands in: the pane it was dropped on,
@@ -1259,7 +1257,11 @@ fn build_dir_preview_tooltip(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::quick_filter_matches;
+    use std::path::PathBuf;
+
+    use gtk4::prelude::*;
+
+    use super::{file_drag_value, quick_filter_matches};
 
     #[test]
     fn quick_filter_is_a_case_insensitive_substring_match() {
@@ -1269,5 +1271,13 @@ mod tests {
         assert!(quick_filter_matches("résumé.odt", "RÉS"));
         assert!(!quick_filter_matches("Report.PDF", "reports"));
         assert!(!quick_filter_matches("notes.txt", "q"));
+    }
+
+    #[test]
+    fn outbound_file_drag_is_not_plain_text() {
+        let value = file_drag_value(&[PathBuf::from("/tmp/example.txt")]);
+
+        assert_eq!(value.type_(), gtk4::gdk::FileList::static_type());
+        assert!(value.get::<String>().is_err());
     }
 }

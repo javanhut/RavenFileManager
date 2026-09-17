@@ -2,9 +2,9 @@
 //!
 //! Drops arrive either from Raven's own listings or from other applications.
 //! Other applications offer a `GdkFileList` (text/uri-list on the wire, or the
-//! portal's file transfer for sandboxed apps); Raven's own drags also carry a
-//! plain string of `file://` lines, and tab reordering uses a string too. Every
-//! file drop target therefore accepts both types, preferring the file list.
+//! portal's file transfer for sandboxed apps). File drop targets also accept
+//! URI strings for compatibility with external and older Raven drag sources;
+//! tab reordering uses a string too.
 //!
 //! Whether a drop copies or moves follows the usual file manager convention:
 //! Ctrl copies, Shift moves, and otherwise files are moved within one
