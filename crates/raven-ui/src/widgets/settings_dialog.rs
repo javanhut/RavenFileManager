@@ -11,6 +11,7 @@ use raven_core::config::{AppConfig, FileAssociation, Keybinding, Theme, ViewMode
 
 use crate::state::AppState;
 use crate::themes;
+use crate::zoom;
 
 /// What the theme row says under its title: where the colours come from.
 fn theme_subtitle(theme: Theme) -> &'static str {
@@ -337,28 +338,10 @@ impl SettingsDialog {
         let sizes_group = adw::PreferencesGroup::new();
         sizes_group.set_title("Sizes");
 
-        let icon_row = adw::SpinRow::new(
-            Some(&gtk::Adjustment::new(
-                config.appearance.icon_size as f64,
-                16.0,
-                64.0,
-                2.0,
-                8.0,
-                0.0,
-            )),
-            1.0,
-            0,
-        );
+        // The same adjustment as the status bar's zoom slider, so the two
+        // always show one value; it applies and saves the size itself.
+        let icon_row = adw::SpinRow::new(Some(&zoom::icon_size_adjustment(&state)), 1.0, 0);
         icon_row.set_title("Icon size");
-        {
-            let state = state.clone();
-            icon_row.connect_value_notify(move |row| {
-                let mut s = state.borrow_mut();
-                s.config.appearance.icon_size = row.value() as u32;
-                themes::apply_sizes(s.config.appearance.font_size, s.config.appearance.icon_size);
-                let _ = s.config.save();
-            });
-        }
         sizes_group.add(&icon_row);
 
         let font_row = adw::SpinRow::new(

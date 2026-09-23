@@ -417,6 +417,12 @@ pub fn apply_sizes(font_size: u32, icon_size: u32) {
     });
 }
 
+/// Edge of the preview grid's square, which a thumbnail is fitted into.
+/// 128px at the stock icon size; at most the thumbnails' own 256px.
+pub fn preview_square(icon_size: u32) -> u32 {
+    (icon_size * 16 / 3).clamp(64, 256)
+}
+
 /// The three icon sizes derived from the base icon size: list rows, the icon
 /// grid, and the preview grid's fallback icon.
 pub fn icon_sizes(icon_size: u32) -> (u32, u32, u32) {
@@ -431,12 +437,16 @@ pub fn icon_sizes(icon_size: u32) -> (u32, u32, u32) {
 fn size_css(font_size: u32, icon_size: u32) -> String {
     let font_size = font_size.clamp(6, 48);
     let (list, grid, preview) = icon_sizes(icon_size);
+    let square = preview_square(icon_size);
+    let tile = square + 12;
     let mut css = format!(
         "window {{ font-size: {font_size}px; }}\n\
          .data-table {{ font-size: {font_size}px; }}\n\
          .raven-list-icon {{ -gtk-icon-size: {list}px; }}\n\
          .raven-grid-icon {{ -gtk-icon-size: {grid}px; }}\n\
-         .raven-preview-icon {{ -gtk-icon-size: {preview}px; }}\n"
+         .raven-preview-icon {{ -gtk-icon-size: {preview}px; }}\n\
+         .raven-preview-square {{ min-width: {square}px; min-height: {square}px; }}\n\
+         .raven-preview-tile {{ min-width: {tile}px; }}\n"
     );
     css.push_str(&scaled_font_rules(APP_CSS, font_size));
     css
@@ -532,6 +542,15 @@ mod tests {
         assert!(css.contains(".raven-list-icon { -gtk-icon-size: 20px; }"));
         assert!(css.contains(".raven-grid-icon { -gtk-icon-size: 64px; }"));
         assert!(css.contains(".raven-preview-icon { -gtk-icon-size: 72px; }"));
+        assert!(css.contains(".raven-preview-square { min-width: 128px; min-height: 128px; }"));
+        assert!(css.contains(".raven-preview-tile { min-width: 140px; }"));
+    }
+
+    #[test]
+    fn preview_square_follows_the_icon_size() {
+        assert_eq!(preview_square(24), 128);
+        assert_eq!(preview_square(16), 85);
+        assert_eq!(preview_square(64), 256);
     }
 
     #[test]

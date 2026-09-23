@@ -778,17 +778,19 @@ impl FileListView {
             vbox.set_margin_bottom(8);
             vbox.set_margin_start(4);
             vbox.set_margin_end(4);
-            vbox.set_width_request(140);
+            // Its width and the square below follow the icon size (see
+            // themes::size_css).
+            vbox.add_css_class("raven-preview-tile");
 
             // Thumbnail picture (for images). The frame fits the picture to
-            // the thumbnail's own shape inside a 128px square, so the rounded
+            // the thumbnail's own shape inside the tile's square, so the rounded
             // corners land on the image rather than on letterboxing around it.
             let picture = gtk::Picture::new();
             picture.set_can_shrink(true);
             picture.add_css_class("thumb");
             picture.set_overflow(gtk::Overflow::Hidden);
             let frame = gtk::AspectFrame::new(0.5, 0.5, 1.0, true);
-            frame.set_size_request(128, 128);
+            frame.add_css_class("raven-preview-square");
             frame.set_child(Some(&picture));
             vbox.append(&frame);
 
@@ -796,7 +798,7 @@ impl FileListView {
             // thumbnail gets so every row of tiles keeps one height.
             let icon_fallback = gtk::Image::new();
             icon_fallback.add_css_class("raven-preview-icon");
-            icon_fallback.set_size_request(128, 128);
+            icon_fallback.add_css_class("raven-preview-square");
             icon_fallback.set_visible(false);
             vbox.append(&icon_fallback);
 

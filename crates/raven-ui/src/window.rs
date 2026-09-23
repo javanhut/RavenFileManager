@@ -292,6 +292,33 @@ impl RavenWindow {
         content_box.append(&sidebar_scroll);
         content_box.append(&views.paned);
 
+        // Ctrl+scroll over the file views zooms, as in other file managers.
+        // Captured before the scrolled windows see it, so it does not scroll.
+        {
+            let state = state.clone();
+            let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+            scroll.set_propagation_phase(gtk::PropagationPhase::Capture);
+            // A touchpad scrolls in fractions of a notch; zoom a step per notch.
+            let pending = Rc::new(std::cell::Cell::new(0.0_f64));
+            scroll.connect_scroll(move |controller, _dx, dy| {
+                if !controller
+                    .current_event_state()
+                    .contains(gtk::gdk::ModifierType::CONTROL_MASK)
+                {
+                    pending.set(0.0);
+                    return glib::Propagation::Proceed;
+                }
+                let total = pending.get() - dy;
+                let steps = total.trunc();
+                pending.set(total - steps);
+                if steps != 0.0 {
+                    crate::zoom::zoom_by(&state, steps);
+                }
+                glib::Propagation::Stop
+            });
+            views.paned.add_controller(scroll);
+        }
+
         // --- Context menu state shared by both panes' menus ---
         let context_selected_tags: Rc<RefCell<HashSet<String>>> =
             Rc::new(RefCell::new(HashSet::new()));
@@ -1235,6 +1262,37 @@ impl RavenWindow {
         disk_usage_status.append(&du_cancel_btn);
 
         status_bar.append(&disk_usage_status);
+
+        // Zoom: the icon size, shared with Settings' "Icon size" row.
+        let zoom_box = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+        zoom_box.add_css_class("zoom-control");
+        let zoom_out = gtk::Button::from_icon_name("zoom-out-symbolic");
+        zoom_out.add_css_class("flat");
+        zoom_out.set_tooltip_text(Some("Smaller"));
+        let zoom_scale = gtk::Scale::new(
+            gtk::Orientation::Horizontal,
+            Some(&crate::zoom::icon_size_adjustment(&state)),
+        );
+        zoom_scale.set_draw_value(false);
+        zoom_scale.set_width_request(110);
+        zoom_scale.set_valign(gtk::Align::Center);
+        zoom_scale.set_tooltip_text(Some("Zoom (Ctrl+scroll)"));
+        let zoom_in = gtk::Button::from_icon_name("zoom-in-symbolic");
+        zoom_in.add_css_class("flat");
+        zoom_in.set_tooltip_text(Some("Bigger"));
+        {
+            let state = state.clone();
+            zoom_out.connect_clicked(move |_| crate::zoom::zoom_by(&state, -1.0));
+        }
+        {
+            let state = state.clone();
+            zoom_in.connect_clicked(move |_| crate::zoom::zoom_by(&state, 1.0));
+        }
+        zoom_box.append(&zoom_out);
+        zoom_box.append(&zoom_scale);
+        zoom_box.append(&zoom_in);
+        status_bar.append(&zoom_box);
+
         toolbar_view.add_bottom_bar(&status_bar);
 
         window.set_content(Some(&toolbar_view));

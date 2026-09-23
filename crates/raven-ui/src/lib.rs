@@ -7,3 +7,4 @@ pub mod themes;
 pub mod thumbnails;
 pub mod widgets;
 pub mod window;
+pub mod zoom;
