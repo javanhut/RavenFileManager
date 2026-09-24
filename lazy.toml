@@ -38,6 +38,7 @@ run = ["cargo test --workspace"]
 run = ["cargo clean"]
 
 [commands.install]
+escalate = true
 run = [
   "echo \"Installing {{bin_name}} to {{destdir}}{{bindir}}...\"",
   "install -Dm755 {{binary}} \"{{destdir}}{{bindir}}/{{bin_name}}\"",
@@ -78,6 +79,7 @@ run = [
 dep = ["build"]
 
 [commands.uninstall]
+escalate = true
 run = [
   "echo \"Uninstalling {{bin_name}}...\"",
   "rm -f \"{{destdir}}{{bindir}}/{{bin_name}}\"",
