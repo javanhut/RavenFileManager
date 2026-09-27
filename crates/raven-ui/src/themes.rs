@@ -6,8 +6,9 @@
 //! Three providers, lowest first:
 //! - `APPLICATION`: Raven Glass, then the file manager's classes.
 //! - `APPLICATION + 1`: the theme -- accent, the light sheet when light, and a
-//!   palette theme's surface colours. Replaced whenever the theme or the
-//!   desktop's appearance changes.
+//!   palette theme's surface colours, or the desktop's glass theme when
+//!   following the desktop. Replaced whenever the theme or the desktop's
+//!   appearance changes.
 //! - `APPLICATION + 2`: font and icon sizes ([`apply_sizes`]).
 //!
 //! Windows carry the `raven` class the shared sheet keys on, and `glass` while
@@ -73,6 +74,9 @@ pub struct Look {
     pub accent: String,
     /// `None` keeps Raven Glass's own surfaces.
     pub palette: Option<Palette>,
+    /// The desktop's glass theme, tinting Raven Glass; empty, which is
+    /// Black Glass, for any theme but Raven.
+    pub glass_theme: String,
 }
 
 impl Look {
@@ -81,6 +85,7 @@ impl Look {
             scheme: if light { Scheme::Light } else { Scheme::Dark },
             accent: accent.to_string(),
             palette,
+            glass_theme: String::new(),
         };
         match theme {
             Theme::Raven => Look {
@@ -91,6 +96,7 @@ impl Look {
                 },
                 accent: desktop.accent.clone(),
                 palette: None,
+                glass_theme: desktop.glass_theme.clone(),
             },
             Theme::AdwaitaDark => fixed(false, "#3584e4", None),
             Theme::AdwaitaLight => fixed(true, "#3584e4", None),
@@ -177,8 +183,9 @@ impl Look {
             // them here is all light mode needs.
             css.push_str(APP_CSS);
         }
-        if let Some(p) = self.palette {
-            css.push_str(&palette_css(&p, light));
+        match self.palette {
+            Some(p) => css.push_str(&palette_css(&p, light)),
+            None => css.push_str(&crate::glass_tint::css(&self.glass_theme, light)),
         }
         css
     }
@@ -559,11 +566,13 @@ mod tests {
             theme_mode: DesktopThemeMode::Light,
             accent: "#F7768E".to_string(),
             transparency: false,
+            glass_theme: "fog".to_string(),
         };
         let look = Look::resolve(Theme::Raven, &desktop);
         assert_eq!(look.scheme, Scheme::Light);
         assert_eq!(look.accent, "#F7768E");
         assert!(look.palette.is_none());
+        assert_eq!(look.glass_theme, "fog");
         let auto = DesktopAppearance {
             theme_mode: DesktopThemeMode::Auto,
             ..desktop
@@ -596,6 +605,18 @@ mod tests {
         let nord = Look::resolve(Theme::Nord, &desktop).css(false);
         assert!(nord.contains("@define-color window_bg_color #2e3440;"));
         assert!(nord.contains("window.raven.glass { background-color: alpha(#2e3440, 0.85); }"));
+    }
+
+    #[test]
+    fn the_glass_theme_tints_raven_but_not_a_palette() {
+        let desktop = DesktopAppearance {
+            glass_theme: "rose".to_string(),
+            ..DesktopAppearance::default()
+        };
+        let raven = Look::resolve(Theme::Raven, &desktop).css(false);
+        assert!(raven.contains("@define-color window_bg_color #5a3a4e;"));
+        let nord = Look::resolve(Theme::Nord, &desktop).css(false);
+        assert!(!nord.contains("#5a3a4e"));
     }
 
     #[test]

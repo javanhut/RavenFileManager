@@ -254,6 +254,9 @@ pub struct DesktopAppearance {
     pub accent: String,
     /// Whether windows are translucent glass.
     pub transparency: bool,
+    /// The glass theme ("black", "fog", ...), as Settings writes it; the
+    /// look decides what it knows.
+    pub glass_theme: String,
 }
 
 impl Default for DesktopAppearance {
@@ -262,6 +265,7 @@ impl Default for DesktopAppearance {
             theme_mode: DesktopThemeMode::Dark,
             accent: DEFAULT_ACCENT.to_string(),
             transparency: true,
+            glass_theme: String::new(),
         }
     }
 }
@@ -279,7 +283,7 @@ impl DesktopAppearance {
             .unwrap_or_default()
     }
 
-    /// Read the three keys that matter here, each on its own: Settings keeps
+    /// Read the four keys that matter here, each on its own: Settings keeps
     /// many more in the file, and one key of an unexpected shape should cost
     /// only that key, not the rest. A file that is not TOML gives the defaults.
     pub fn parse(text: &str) -> Self {
@@ -304,6 +308,9 @@ impl DesktopAppearance {
         }
         if let Some(transparency) = section.get("transparency").and_then(|v| v.as_bool()) {
             appearance.transparency = transparency;
+        }
+        if let Some(glass_theme) = section.get("glass_theme").and_then(|v| v.as_str()) {
+            appearance.glass_theme = glass_theme.to_string();
         }
         appearance
     }
@@ -809,12 +816,13 @@ mod tests {
     }
 
     #[test]
-    fn desktop_appearance_reads_the_three_keys() {
+    fn desktop_appearance_reads_its_keys() {
         let text = r##"
             [appearance]
             theme_mode = "light"
             accent = "#F7768E"
             transparency = false
+            glass_theme = "rose"
             scale = 0.9
             wallpaper = "/somewhere.png"
 
@@ -825,6 +833,7 @@ mod tests {
         assert_eq!(a.theme_mode, DesktopThemeMode::Light);
         assert_eq!(a.accent, "#F7768E");
         assert!(!a.transparency);
+        assert_eq!(a.glass_theme, "rose");
         assert_eq!(DesktopAppearance::parse("[appearance]\ntheme_mode = \"auto\"").theme_mode, DesktopThemeMode::Auto);
     }
 

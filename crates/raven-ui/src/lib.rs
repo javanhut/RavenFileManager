@@ -1,6 +1,7 @@
 pub mod app;
 pub mod dnd;
 pub mod file_opener;
+mod glass_tint;
 pub mod recent;
 pub mod state;
 pub mod themes;
