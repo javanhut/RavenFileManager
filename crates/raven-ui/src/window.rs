@@ -1297,6 +1297,43 @@ impl RavenWindow {
 
         window.set_content(Some(&toolbar_view));
 
+        // The header's buttons alone are ~760px wide, and a window can never
+        // be narrower than its content: tiled or dragged smaller, the window
+        // was cut off instead, taking the listing's right edge and its
+        // sideways scrolling out of view. Narrow windows shed the title and
+        // the toggles that have a shortcut, the narrowest the view switch
+        // too, so the window shrinks and the listing scrolls instead.
+        window.set_size_request(420, 300);
+        {
+            let hide = |bp: &adw::Breakpoint, widgets: &[&gtk::Widget]| {
+                bp.add_setter(&header, "show-title", Some(&false.to_value()));
+                for widget in widgets {
+                    bp.add_setter(*widget, "visible", Some(&false.to_value()));
+                }
+            };
+            let narrow = adw::Breakpoint::new(
+                adw::BreakpointCondition::parse("max-width: 800sp").expect("valid condition"),
+            );
+            hide(&narrow, &[dual_btn.upcast_ref(), hidden_btn.upcast_ref()]);
+            window.add_breakpoint(narrow);
+
+            // Only one breakpoint applies at a time, the last added that
+            // matches, so this one repeats the one above.
+            let narrower = adw::Breakpoint::new(
+                adw::BreakpointCondition::parse("max-width: 640sp").expect("valid condition"),
+            );
+            hide(
+                &narrower,
+                &[
+                    dual_btn.upcast_ref(),
+                    hidden_btn.upcast_ref(),
+                    preview_btn.upcast_ref(),
+                    view_mode_box.upcast_ref(),
+                ],
+            );
+            window.add_breakpoint(narrower);
+        }
+
         // --- Hidden files toggle ---
         {
             let state = state.clone();

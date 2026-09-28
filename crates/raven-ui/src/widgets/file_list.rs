@@ -342,14 +342,16 @@ impl FileListView {
         stack.add_named(&list_scroll, Some("list"));
 
         let icon_scroll = gtk::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
+            // Sideways too: a pane narrower than one tile scrolls to it
+            // rather than making the tile the window's minimum width.
+            .hscrollbar_policy(gtk::PolicyType::Automatic)
             .vscrollbar_policy(gtk::PolicyType::Automatic)
             .child(&icon_grid_view)
             .build();
         stack.add_named(&icon_scroll, Some("icons"));
 
         let preview_scroll = gtk::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
+            .hscrollbar_policy(gtk::PolicyType::Automatic)
             .vscrollbar_policy(gtk::PolicyType::Automatic)
             .child(&preview_grid_view)
             .build();

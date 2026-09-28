@@ -14,6 +14,8 @@ use crate::state::PaneResolver;
 pub struct PathBar {
     pub container: gtk::Box,
     breadcrumb_box: gtk::Box,
+    /// Scrolls the crumbs sideways in a pane too narrow for them all.
+    breadcrumb_scroll: gtk::ScrolledWindow,
     entry: gtk::Entry,
     edit_mode: Rc<RefCell<bool>>,
 }
@@ -30,12 +32,28 @@ impl PathBar {
         let breadcrumb_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         breadcrumb_box.set_hexpand(true);
 
+        // Without this the crumbs' width was the pane's minimum, and with it
+        // the window's: a narrow window was cut off rather than shrunk. Here
+        // they scroll instead, kept at their end so the folder shown stays
+        // in view.
+        let breadcrumb_scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::External)
+            .vscrollbar_policy(gtk::PolicyType::Never)
+            .propagate_natural_width(true)
+            .propagate_natural_height(true)
+            .hexpand(true)
+            .child(&breadcrumb_box)
+            .build();
+        breadcrumb_scroll.hadjustment().connect_changed(|adj| {
+            adj.set_value(adj.upper() - adj.page_size());
+        });
+
         let entry = gtk::Entry::new();
         entry.set_hexpand(true);
         entry.set_visible(false);
         entry.set_placeholder_text(Some("Enter path..."));
 
-        container.append(&breadcrumb_box);
+        container.append(&breadcrumb_scroll);
         container.append(&entry);
 
         let edit_mode = Rc::new(RefCell::new(false));
@@ -43,7 +61,7 @@ impl PathBar {
         // When Enter is pressed in the entry, navigate to the typed path
         let cmd_tx = command_tx.clone();
         let entry_clone = entry.clone();
-        let breadcrumb_clone = breadcrumb_box.clone();
+        let breadcrumb_clone = breadcrumb_scroll.clone();
         let edit_mode_clone = edit_mode.clone();
         entry.connect_activate(move |entry| {
             let text = entry.text().to_string();
@@ -62,7 +80,7 @@ impl PathBar {
 
         // Escape cancels edit mode
         let entry_clone2 = entry.clone();
-        let breadcrumb_clone2 = breadcrumb_box.clone();
+        let breadcrumb_clone2 = breadcrumb_scroll.clone();
         let edit_mode_clone2 = edit_mode.clone();
         let key_controller = gtk::EventControllerKey::new();
         key_controller.connect_key_pressed(move |_, key, _, _| {
@@ -79,6 +97,7 @@ impl PathBar {
         Self {
             container,
             breadcrumb_box,
+            breadcrumb_scroll,
             entry,
             edit_mode,
         }
@@ -89,13 +108,13 @@ impl PathBar {
         let mut editing = self.edit_mode.borrow_mut();
         *editing = !*editing;
         if *editing {
-            self.breadcrumb_box.set_visible(false);
+            self.breadcrumb_scroll.set_visible(false);
             self.entry.set_visible(true);
             self.entry.grab_focus();
             self.entry.select_region(0, -1);
         } else {
             self.entry.set_visible(false);
-            self.breadcrumb_box.set_visible(true);
+            self.breadcrumb_scroll.set_visible(true);
         }
     }
 
