@@ -4243,6 +4243,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "raven-glass"
+version = "0.0.1"
+
+[[package]]
 name = "raven-ops"
 version = "0.1.0"
 dependencies = [
@@ -4335,6 +4339,7 @@ dependencies = [
  "raven-core",
  "raven-dbus",
  "raven-git",
+ "raven-glass",
  "raven-ops",
  "raven-plugin",
  "raven-preview",

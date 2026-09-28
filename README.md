@@ -167,10 +167,10 @@ Put a `raven/desktop.toml` in the scratch config (`[appearance] theme_mode`,
 ## Look
 
 Raven File Manager is drawn in Raven Glass, the design shared by the Raven
-apps: `data/resources/raven-glass.css` and `raven-glass-light.css` are kept
-byte-identical with the copies in Raven Settings, Store, Power and Viewer, and
-`data/resources/style.css` holds the file manager's own classes. The default
-theme, "Raven (follows desktop)", takes accent, light or dark, and transparency
+apps: the shared sheets come from the raven-glass crate in RavenGUI (installed
+at `/usr/share/raven/glass/`), and `data/resources/style.css` holds the file
+manager's own classes. The default theme, "Raven (follows desktop)", takes
+accent, light or dark, and transparency
 from `~/.config/raven/desktop.toml` and follows changes made in Raven Settings
 live; the other themes keep Raven Glass's layout with their own colours.
 

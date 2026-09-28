@@ -1,7 +1,6 @@
-//! The look: Raven Glass, the stylesheet shared by the Raven apps
-//! (`data/resources/raven-glass.css`, kept byte-identical with the copies in
-//! Raven Settings, Store, Power and Viewer), then the file manager's own
-//! classes (`data/resources/style.css`).
+//! The look: Raven Glass, the stylesheet shared by the Raven apps (from the
+//! raven-glass crate in RavenGUI, installed at /usr/share/raven/glass/), then
+//! the file manager's own classes (`data/resources/style.css`).
 //!
 //! Three providers, lowest first:
 //! - `APPLICATION`: Raven Glass, then the file manager's classes.
@@ -25,8 +24,6 @@ use libadwaita as adw;
 
 use raven_core::config::{DesktopAppearance, DesktopThemeMode, Theme};
 
-const RAVEN_GLASS_CSS: &str = include_str!("../../../data/resources/raven-glass.css");
-const RAVEN_GLASS_LIGHT_CSS: &str = include_str!("../../../data/resources/raven-glass-light.css");
 const APP_CSS: &str = include_str!("../../../data/resources/style.css");
 
 /// How long `desktop.toml` has to be quiet before it is read again: Settings
@@ -176,7 +173,7 @@ impl Look {
             self.accent
         );
         if light {
-            css.push_str(RAVEN_GLASS_LIGHT_CSS);
+            css.push_str(raven_glass::light_css());
             // The light sheet sits a provider above the file manager's own
             // rules and would win over them for the widgets both style; the
             // rules are written against the foreground colour, so repeating
@@ -185,7 +182,7 @@ impl Look {
         }
         match self.palette {
             Some(p) => css.push_str(&palette_css(&p, light)),
-            None => css.push_str(&crate::glass_tint::css(&self.glass_theme, light)),
+            None => css.push_str(&raven_glass::tint::css(&self.glass_theme, light)),
         }
         css
     }
@@ -243,7 +240,7 @@ pub fn init(theme: Theme) {
 
     let display = gtk::gdk::Display::default().expect("Could not get default display");
     let base = gtk::CssProvider::new();
-    base.load_from_string(&format!("{RAVEN_GLASS_CSS}\n{APP_CSS}"));
+    base.load_from_string(&format!("{}\n{APP_CSS}", raven_glass::base_css()));
     gtk::style_context_add_provider_for_display(
         &display,
         &base,
