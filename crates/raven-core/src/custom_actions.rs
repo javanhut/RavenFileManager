@@ -122,6 +122,13 @@ impl CustomAction {
         }
     }
 
+    /// Whether the command is installed: an executable file at the path
+    /// given, or one found on `$PATH` for a bare name. An action that cannot
+    /// run is left out of the menu rather than offered and failing.
+    pub fn is_available(&self) -> bool {
+        program_available(self.command.trim(), std::env::var_os("PATH").as_deref())
+    }
+
     /// The arguments with placeholders filled in for `target`.
     ///
     /// `{path}` is the first selected path (the directory when nothing is
@@ -166,6 +173,25 @@ impl CustomAction {
         }
         out
     }
+}
+
+fn program_available(command: &str, path_var: Option<&std::ffi::OsStr>) -> bool {
+    if command.is_empty() {
+        return false;
+    }
+    if command.contains('/') {
+        return is_executable(Path::new(command));
+    }
+    path_var
+        .map(std::env::split_paths)
+        .into_iter()
+        .flatten()
+        .any(|dir| is_executable(&dir.join(command)))
+}
+
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 /// Where the user's own actions file lives.
@@ -303,6 +329,7 @@ mod tests {
         assert!(actions.iter().any(|a| a.name == "Open in Terminal"));
         let terminal = actions.iter().find(|a| a.name == "Open in Terminal").unwrap();
         assert_eq!(terminal.show_for, ShowFor::Directories);
+        assert_eq!(terminal.command, "raven-open");
         let compress = actions.iter().find(|a| a.name == "Compress...").unwrap();
         assert!(compress.multiple);
     }
@@ -379,6 +406,30 @@ mod tests {
         let none = ActionTarget::from_selection(&[], Path::new("/a")).unwrap();
         assert_eq!(none.directory, PathBuf::from("/a"));
         assert!(none.paths.is_empty());
+    }
+
+    #[test]
+    fn availability_follows_path_and_the_executable_bit() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("raven-actions-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tool = dir.join("tool");
+        std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+        let plain = dir.join("plain");
+        std::fs::write(&plain, "").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let path_var = std::env::join_paths(["/nonexistent", dir.to_str().unwrap()]).unwrap();
+
+        assert!(program_available("tool", Some(&path_var)));
+        assert!(!program_available("plain", Some(&path_var)));
+        assert!(!program_available("missing", Some(&path_var)));
+        assert!(!program_available("tool", None));
+        assert!(program_available(tool.to_str().unwrap(), None));
+        assert!(!program_available(plain.to_str().unwrap(), None));
+        assert!(!program_available("", Some(&path_var)));
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

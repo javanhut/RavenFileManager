@@ -769,6 +769,7 @@ impl RavenWindow {
         {
             let file_list = file_list.clone();
             let state = state.clone();
+            let open_status = open_status.clone();
             let action = gio::SimpleAction::new("custom-action", Some(glib::VariantTy::INT32));
             action.connect_activate(move |_, parameter| {
                 let Some(idx) = parameter.and_then(|v| v.get::<i32>()) else {
@@ -792,7 +793,7 @@ impl RavenWindow {
                 let Some(target) = ActionTarget::from_selection(&selected, current_local) else {
                     return;
                 };
-                run_custom_action(&custom, &target);
+                run_custom_action(&custom, &target, &open_status);
             });
             action_group.add_action(&action);
         }
@@ -2798,11 +2799,16 @@ fn dispatch_key_action(ctx: &KeyContext, action: &str) -> bool {
     true
 }
 
-/// Launch a custom action detached from the file manager. Failures to start
-/// are logged; the command's own output is not collected.
-fn run_custom_action(action: &CustomAction, target: &ActionTarget) {
+/// Launch a custom action detached from the file manager. A command that
+/// cannot start, or that exits with a failure, is reported in the status bar
+/// with the first thing it wrote to stderr.
+fn run_custom_action(
+    action: &CustomAction,
+    target: &ActionTarget,
+    status: &Rc<RefCell<Option<gtk::Label>>>,
+) {
     if action.command.trim().is_empty() {
-        tracing::warn!("Custom action \"{}\" has no command", action.name);
+        report_open_error(status, &format!("\"{}\" has no command to run", action.name));
         return;
     }
     let args = action.expand_args(target);
@@ -2813,16 +2819,49 @@ fn run_custom_action(action: &CustomAction, target: &ActionTarget) {
         args,
         target.directory.display()
     );
-    let result = std::process::Command::new(&action.command)
+    let child = std::process::Command::new(&action.command)
         .args(&args)
         .current_dir(&target.directory)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn();
-    if let Err(e) = result {
-        tracing::error!("Custom action \"{}\" failed to start: {}", action.name, e);
-    }
+    let child = match child {
+        Ok(child) => child,
+        Err(e) => {
+            report_open_error(
+                status,
+                &format!("\"{}\" could not start {}: {}", action.name, action.command, e),
+            );
+            return;
+        }
+    };
+
+    // Waited for off the main thread: a launcher such as raven-open returns
+    // at once, but an action may be the application itself and run for hours.
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    let name = action.name.clone();
+    let status = status.clone();
+    glib::spawn_future_local(async move {
+        let Ok(Ok(output)) = rx.await else { return };
+        if output.status.success() {
+            return;
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let reason = stderr
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| match output.status.code() {
+                Some(code) => format!("exit status {}", code),
+                None => "stopped by a signal".to_string(),
+            });
+        report_open_error(&status, &format!("\"{}\" failed: {}", name, reason));
+    });
 }
 
 /// The connection a remote path belongs to, in the backend's key format.

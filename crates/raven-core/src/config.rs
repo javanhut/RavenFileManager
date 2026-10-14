@@ -97,7 +97,6 @@ pub struct GeneralConfig {
     pub confirm_delete: bool,
     pub confirm_trash: bool,
     pub single_click_open: bool,
-    pub default_terminal: String,
 }
 
 impl Default for GeneralConfig {
@@ -107,7 +106,6 @@ impl Default for GeneralConfig {
             confirm_delete: true,
             confirm_trash: false,
             single_click_open: false,
-            default_terminal: "xdg-terminal-emulator".to_string(),
         }
     }
 }

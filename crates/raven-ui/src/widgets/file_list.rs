@@ -454,6 +454,7 @@ impl FileListView {
         // Name column (icon + name)
         let name_factory = gtk::SignalListItemFactory::new();
         let drag_selection = selection.clone();
+        let drag_cmd_tx = command_tx.clone();
         name_factory.connect_setup(move |_, item| {
             let item = item.downcast_ref::<gtk::ListItem>().unwrap();
             let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -472,7 +473,7 @@ impl FileListView {
             hbox.append(&icon);
             hbox.append(&label);
 
-            attach_item_drag(&hbox, &drag_selection);
+            attach_item_drag(&hbox, &drag_selection, &drag_cmd_tx);
 
             item.set_child(Some(&hbox));
         });
@@ -668,6 +669,7 @@ impl FileListView {
         let factory = gtk::SignalListItemFactory::new();
 
         let drag_selection = selection.clone();
+        let drag_cmd_tx = command_tx.clone();
         factory.connect_setup(move |_, item| {
             let item = item.downcast_ref::<gtk::ListItem>().unwrap();
             let vbox = gtk::Box::new(gtk::Orientation::Vertical, 4);
@@ -695,7 +697,7 @@ impl FileListView {
             label.set_halign(gtk::Align::Center);
             vbox.append(&label);
 
-            attach_item_drag(&vbox, &drag_selection);
+            attach_item_drag(&vbox, &drag_selection, &drag_cmd_tx);
 
             item.set_child(Some(&vbox));
         });
@@ -771,6 +773,7 @@ impl FileListView {
         let factory = gtk::SignalListItemFactory::new();
 
         let drag_selection = selection.clone();
+        let drag_cmd_tx = command_tx.clone();
         factory.connect_setup(move |_, item| {
             let item = item.downcast_ref::<gtk::ListItem>().unwrap();
             let vbox = gtk::Box::new(gtk::Orientation::Vertical, 4);
@@ -813,7 +816,7 @@ impl FileListView {
             label.set_halign(gtk::Align::Center);
             vbox.append(&label);
 
-            attach_item_drag(&vbox, &drag_selection);
+            attach_item_drag(&vbox, &drag_selection, &drag_cmd_tx);
 
             item.set_child(Some(&vbox));
         });
@@ -1125,9 +1128,14 @@ fn show_thumbnail(item: &gtk::Box, icon: &gtk::Image, entry_obj: &FileEntryObjec
     });
 }
 
-/// Make a list item draggable, and give it the "item-pos" cell that bind
-/// keeps current and both the drag and right-click read.
-fn attach_item_drag(widget: &gtk::Box, selection: &gtk::MultiSelection) {
+/// Make a list item draggable and, when it shows a folder, a place to drop
+/// files into; give it the "item-pos" cell that bind keeps current and the
+/// drag, the drop and right-click all read.
+fn attach_item_drag(
+    widget: &gtk::Box,
+    selection: &gtk::MultiSelection,
+    cmd_tx: &tokio::sync::mpsc::UnboundedSender<AppCommand>,
+) {
     let pos_cell: Rc<RefCell<u32>> = Rc::new(RefCell::new(u32::MAX));
 
     let drag_source = gtk::DragSource::new();
@@ -1144,9 +1152,59 @@ fn attach_item_drag(widget: &gtk::Box, selection: &gtk::MultiSelection) {
     });
     widget.add_controller(drag_source);
 
+    attach_folder_drop(widget, selection, &pos_cell, cmd_tx);
+
     unsafe {
         widget.set_data("item-pos", pos_cell);
     }
+}
+
+/// The folder an item widget currently shows, if it shows one. Item widgets
+/// are recycled between rows, so this is read from the bound position at the
+/// time of asking rather than captured when the widget is made.
+fn folder_at(selection: &gtk::MultiSelection, pos: u32) -> Option<RavenPath> {
+    if pos == u32::MAX {
+        return None;
+    }
+    selection
+        .item(pos)
+        .and_downcast::<FileEntryObject>()
+        .and_then(|obj| obj.entry())
+        .filter(|entry| entry.is_dir())
+        .map(|entry| entry.path)
+}
+
+/// Let files be dropped onto a folder item, copying or moving them into that
+/// folder. Over a file the target declines the drag, so it falls through to
+/// the listing's own target, which drops into the folder being shown.
+fn attach_folder_drop(
+    widget: &gtk::Box,
+    selection: &gtk::MultiSelection,
+    pos_cell: &Rc<RefCell<u32>>,
+    cmd_tx: &tokio::sync::mpsc::UnboundedSender<AppCommand>,
+) {
+    let folder = {
+        let selection = selection.clone();
+        let pos = pos_cell.clone();
+        move || folder_at(&selection, *pos.borrow())
+    };
+    let target = crate::dnd::file_drop_target(Some("drop-highlight"), folder.clone());
+    {
+        let folder = folder.clone();
+        // Replaces the default check, which only compares formats: a file
+        // item must not swallow a drag meant for the listing around it.
+        target.connect_accept(move |_, drop| {
+            let formats = drop.formats();
+            folder().is_some()
+                && (formats.contains_type(gtk::gdk::FileList::static_type())
+                    || formats.contains_type(glib::Type::STRING))
+        });
+    }
+    let cmd_tx = cmd_tx.clone();
+    target.connect_drop(move |target, value, _x, _y| {
+        folder().is_some_and(|dest| crate::dnd::perform_drop(target, value, &dest, &cmd_tx))
+    });
+    widget.add_controller(target);
 }
 
 /// The data a drag out of the list carries: the whole selection when the

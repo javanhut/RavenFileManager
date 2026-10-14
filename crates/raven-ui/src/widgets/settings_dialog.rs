@@ -197,28 +197,6 @@ impl SettingsDialog {
 
         content.append(&behavior_group);
 
-        // Terminal section
-        let terminal_group = adw::PreferencesGroup::new();
-        terminal_group.set_title("Terminal");
-
-        let terminal_row = adw::EntryRow::new();
-        terminal_row.set_title("Default terminal emulator");
-        terminal_row.set_text(&config.general.default_terminal);
-        {
-            let state = state.clone();
-            terminal_row.connect_changed(move |row| {
-                let text = row.text().to_string();
-                if !text.is_empty() {
-                    let mut s = state.borrow_mut();
-                    s.config.general.default_terminal = text;
-                    let _ = s.config.save();
-                }
-            });
-        }
-        terminal_group.add(&terminal_row);
-
-        content.append(&terminal_group);
-
         scroll.set_child(Some(&content));
         scroll
     }

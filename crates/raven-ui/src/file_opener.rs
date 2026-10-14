@@ -19,9 +19,9 @@ pub fn open_file(path: &RavenPath, config: &AppConfig) {
 /// Open a file the way a double click does.
 ///
 /// Raven's own file associations win, since the user configured them on
-/// purpose. Otherwise the desktop default for the file's content type is used
-/// through GIO (the same lookup the Open With menu shows as "default"), and
-/// only if GIO cannot launch anything does the `open` crate get a try.
+/// purpose. Otherwise the file goes to `raven-open`, Raven's opener, so a
+/// double click here opens with exactly what every other part of the desktop
+/// would choose, and a `Terminal=true` application runs in Raven's terminal.
 pub fn try_open_file(path: &RavenPath, config: &AppConfig) -> Result<(), String> {
     let Some(local) = path.as_local_path() else {
         return Err("Only local files can be opened".to_string());
@@ -34,27 +34,56 @@ pub fn try_open_file(path: &RavenPath, config: &AppConfig) -> Result<(), String>
         return Ok(());
     }
 
-    let uri = gio::File::for_path(local).uri();
-    let context = default_launch_context();
-    match gio::AppInfo::launch_default_for_uri(&uri, context.as_ref()) {
-        Ok(()) => {
-            record_recent(local);
-            Ok(())
-        }
-        Err(gio_err) => {
-            tracing::debug!("GIO could not open {}: {}", uri, gio_err);
-            match open::that(local) {
-                Ok(()) => {
-                    record_recent(local);
-                    Ok(())
-                }
-                Err(e) => Err(format!(
-                    "Could not open {}: {}",
-                    local.display(),
-                    first_non_empty(&gio_err.to_string(), &e.to_string())
-                )),
+    run_raven_open(&[local.as_os_str()])?;
+    record_recent(local);
+    Ok(())
+}
+
+/// Open the desktop's terminal with a shell in `dir`: the one chosen in the
+/// Raven settings, which `raven-open --terminal` looks up.
+pub fn open_terminal(dir: &Path) -> Result<(), String> {
+    run_raven_open(&[std::ffi::OsStr::new("--terminal"), dir.as_os_str()])
+}
+
+/// Raven's opener. It is installed as `xdg-open` too, but asked for by its
+/// own name: the file manager relies on its Raven-only options.
+const RAVEN_OPEN: &str = "raven-open";
+
+/// Run `raven-open` with `args` and report how it went. It returns as soon as
+/// it has started the application, so waiting for it costs only the lookup,
+/// and its exit status and message say why nothing opened.
+fn run_raven_open(args: &[&std::ffi::OsStr]) -> Result<(), String> {
+    let output = std::process::Command::new(RAVEN_OPEN)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|e| format!("Could not run {}: {}", RAVEN_OPEN, e))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(raven_open_error(&stderr, output.status.code()))
+}
+
+/// The message to show for a failed `raven-open`: the first thing it said,
+/// without its `raven-open: ` prefix, or the exit status when it said nothing.
+fn raven_open_error(stderr: &str, code: Option<i32>) -> String {
+    let said = stderr.lines().map(str::trim).find(|l| !l.is_empty());
+    match said {
+        Some(line) => {
+            let line = line.strip_prefix("raven-open: ").unwrap_or(line);
+            let mut message = line.to_string();
+            if let Some(first) = message.get(..1) {
+                message.replace_range(..1, &first.to_uppercase());
             }
+            message
         }
+        None => match code {
+            Some(code) => format!("{} failed (exit status {})", RAVEN_OPEN, code),
+            None => format!("{} was stopped", RAVEN_OPEN),
+        },
     }
 }
 
@@ -80,21 +109,6 @@ fn association_for(config: &AppConfig, local: &Path) -> Option<usize> {
         .file_associations
         .iter()
         .position(|assoc| !assoc.mime_pattern.is_empty() && mime_matches(&assoc.mime_pattern, &mime))
-}
-
-fn first_non_empty<'a>(a: &'a str, b: &'a str) -> &'a str {
-    if a.is_empty() {
-        b
-    } else {
-        a
-    }
-}
-
-/// Launch context for the default display, so launched applications get
-/// startup notification and land on the right screen. `None` when GTK has no
-/// display (tests, headless).
-fn default_launch_context() -> Option<gio::AppLaunchContext> {
-    gtk::gdk::Display::default().map(|d| d.app_launch_context().upcast())
 }
 
 /// The shell command line for `command` applied to `file_path`: `%f` is
@@ -444,6 +458,16 @@ pub fn record_recent(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raven_open_failures_read_as_messages() {
+        assert_eq!(
+            raven_open_error("raven-open: no application opens application/x-foo\n", Some(3)),
+            "No application opens application/x-foo"
+        );
+        assert_eq!(raven_open_error("", Some(4)), "raven-open failed (exit status 4)");
+        assert_eq!(raven_open_error("\n", None), "raven-open was stopped");
+    }
 
     #[test]
     fn target_round_trips() {

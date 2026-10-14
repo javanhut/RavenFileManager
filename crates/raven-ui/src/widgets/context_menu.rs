@@ -182,12 +182,13 @@ impl FileContextMenu {
             .append_submenu(Some("Plugins"), &submenu);
     }
 
-    /// Offer the custom actions that apply to `selected`. Each item carries the
-    /// action's index so the window can look it up when activated.
+    /// Offer the custom actions that apply to `selected` and whose command is
+    /// installed. Each item carries the action's index so the window can look
+    /// it up when activated.
     pub fn update_custom_actions(&self, actions: &[CustomAction], selected: &[FileEntry]) {
         self.actions_section.remove_all();
         for (i, action) in actions.iter().enumerate() {
-            if !action.applies_to(selected) {
+            if !action.applies_to(selected) || !action.is_available() {
                 continue;
             }
             let item = gio::MenuItem::new(Some(&action.name), None);

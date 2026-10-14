@@ -3,7 +3,6 @@ show_hidden_files = false
 confirm_delete = true
 confirm_trash = false
 single_click_open = false
-default_terminal = "xdg-terminal-emulator"
 
 [appearance]
 icon_size = 24

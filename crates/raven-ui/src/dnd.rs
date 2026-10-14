@@ -108,10 +108,13 @@ fn same_filesystem_as(source_devs: Option<&[u64]>, destination: &RavenPath) -> O
 
 /// The sources that would actually go anywhere: files already living in
 /// `destination` are dropped from the transfer rather than moved onto
-/// themselves (or copied next to themselves), while the rest still go.
+/// themselves (or copied next to themselves), and so is a folder dropped onto
+/// itself or into one of its own subfolders, while the rest still go.
 pub fn sources_to_transfer(paths: &[PathBuf], destination: &RavenPath) -> Vec<RavenPath> {
+    let dest_local = destination.as_local_path();
     paths
         .iter()
+        .filter(|src| !dest_local.is_some_and(|dest| dest.starts_with(src)))
         .cloned()
         .map(RavenPath::local)
         .filter(|src| src.parent().as_ref() != Some(destination))
@@ -455,10 +458,14 @@ mod tests {
             vec![RavenPath::local("/b/y.txt")]
         );
         assert!(sources_to_transfer(&paths[..1], &dest).is_empty());
-        // A folder dropped onto itself is not "already in" itself.
+        // A folder never goes into itself or below itself.
+        assert!(sources_to_transfer(&[PathBuf::from("/a")], &dest).is_empty());
+        let inside = RavenPath::local("/b/y/deeper");
+        assert!(sources_to_transfer(&[PathBuf::from("/b/y")], &inside).is_empty());
+        // A sibling whose name merely shares a prefix still goes.
         assert_eq!(
-            sources_to_transfer(&[PathBuf::from("/a")], &dest),
-            vec![RavenPath::local("/a")]
+            sources_to_transfer(&[PathBuf::from("/a/x")], &RavenPath::local("/a/xy")),
+            vec![RavenPath::local("/a/x")]
         );
     }
 }

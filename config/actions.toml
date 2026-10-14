@@ -1,10 +1,12 @@
 # Custom context menu actions
-# These appear in the right-click context menu
+# These appear in the right-click context menu. An action whose command is
+# not installed is left out of the menu.
 
+# Raven's opener starts the terminal chosen in the desktop settings.
 [[actions]]
 name = "Open in Terminal"
-command = "xdg-terminal-emulator"
-args = ["--working-directory", "{directory}"]
+command = "raven-open"
+args = ["--terminal", "{directory}"]
 icon = "utilities-terminal-symbolic"
 show_for = "directories"
 
@@ -13,13 +15,6 @@ name = "Open in Code"
 command = "code"
 args = ["{path}"]
 icon = "text-editor-symbolic"
-show_for = "all"
-
-[[actions]]
-name = "Open as Root"
-command = "pkexec"
-args = ["xdg-open", "{path}"]
-icon = "dialog-password-symbolic"
 show_for = "all"
 
 [[actions]]
